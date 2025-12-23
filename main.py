@@ -32,18 +32,32 @@ def download_file(url, filename, file_type="File"):
     try:
         print(f"Đang tải {file_type} từ: {url}")
         response = requests.get(url, headers=headers, stream=True, timeout=60)
+        
         if response.status_code != 200:
+            # Nếu là Font thì cho qua, không báo lỗi chết chương trình
+            if file_type == "Font":
+                print(f"Không tải được Font (Mã {response.status_code}). Sẽ dùng font mặc định.")
+                return False
             raise Exception(f"Server trả về mã lỗi {response.status_code}")
+            
         with open(filename, 'wb') as f:
             response.raw.decode_content = True
             shutil.copyfileobj(response.raw, f)
+        return True
+            
     except Exception as e:
+        if file_type == "Font":
+            print(f"Lỗi tải Font: {e}. Sẽ dùng font mặc định.")
+            return False
         raise HTTPException(status_code=400, detail=f"Lỗi tải {file_type}: {str(e)} | URL: {url}")
 
 def ensure_font_exists():
-    font_name = "Lora-Bold.ttf"
+    font_name = "Merriweather-Bold.ttf"
     if not os.path.exists(font_name):
-        download_file("https://github.com/google/fonts/raw/main/ofl/lora/static/Lora-Bold.ttf", font_name, "Font")
+        # Link font Merriweather Bold (Ổn định hơn Lora hiện tại)
+        success = download_file("https://github.com/google/fonts/raw/main/ofl/merriweather/Merriweather-Bold.ttf", font_name, "Font")
+        if not success:
+            return None
     return font_name if os.path.exists(font_name) else None
 
 @app.post("/merge")
@@ -57,9 +71,11 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
     files_to_clean = [input_video, input_audio, output_file, subtitle_file]
 
     try:
-        # 1. Tải file
+        # 1. Tải file Video/Audio
         download_file(request.video_url, input_video, "Video")
         download_file(request.audio_url, input_audio, "Audio")
+        
+        # Tải Font (Nếu lỗi thì font_path sẽ là None)
         font_path = ensure_font_exists()
 
         # 2. Xử lý Subtitle
@@ -74,13 +90,15 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
         filters.append(f"[0:v]format=yuv420p[v0]") 
         last_stream = "[v0]"
         
-        # === PHẦN CHỈNH SỬA STYLE TEXT Ở ĐÂY ===
+        # === TEXT STYLE (YouTube Thumbnail) ===
         if request.keyword:
             sanitized_text = request.keyword.replace(":", "\\:").replace("'", "")
+            
+            # Nếu có font thì dùng, không thì dùng font mặc định hệ thống
             font_cmd = f"fontfile={font_path}:" if font_path else ""
             
-            # Style mới: Chữ trắng (white), viền đen (bordercolor=black), dày 8px (borderw=8)
-            styling = "fontcolor=white:bordercolor=black:borderw=8:fontsize=130"
+            # Style: Chữ trắng, Viền đen dày 7px
+            styling = "fontcolor=white:bordercolor=black:borderw=7:fontsize=130"
             position = "x=(w-text_w)/2:y=(h-text_h)/2"
             
             draw_cmd = f"drawtext={font_cmd}text='{sanitized_text}':{styling}:{position}"
@@ -88,9 +106,12 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
             last_stream = "[v1]"
         # =======================================
 
+        # === SUBTITLE STYLE ===
         if has_sub:
-            # Style cho Subtitle (giữ nguyên màu vàng viền đen cho dễ đọc bên dưới)
-            style = "FontName=Lora-Bold,FontSize=24,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=30,Alignment=2"
+            # Font chữ cho Subtitle cũng dùng Merriweather nếu tải được
+            font_name_sub = "Merriweather-Bold" if font_path else "Arial"
+            # Style: Chữ vàng, Viền đen
+            style = f"FontName={font_name_sub},FontSize=24,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=30,Alignment=2"
             sub_cmd = f"subtitles={subtitle_file}:fontsdir=.:force_style='{style}'"
             filters.append(f"{last_stream}{sub_cmd}[v2]")
             last_stream = "[v2]"
