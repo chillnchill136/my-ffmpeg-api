@@ -7,6 +7,7 @@ import urllib3
 import textwrap
 import gc
 import json
+import resource # Thư viện để check RAM hệ thống
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -31,8 +32,31 @@ def system_download(url, filename):
     except: pass
     return False
 
+# === QUAN TRỌNG: KIỂM TRA RAM THỰC TẾ ===
+def log_memory():
+    """In ra dung lượng RAM giới hạn của Container"""
+    try:
+        # Lấy giới hạn RAM từ file cgroup (chuẩn Docker/Linux)
+        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes", "r") as f:
+            mem_bytes = int(f.read())
+            mem_gb = mem_bytes / (1024**3)
+            print(f"🔥🔥🔥 RAM LIMIT TRÊN SERVER: {mem_gb:.2f} GB 🔥🔥🔥")
+            return mem_gb
+    except:
+        print("-> Không đọc được limit RAM chính xác, thử cách khác...")
+        
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        print(f"🔥🔥🔥 RAM TOTAL HỆ THỐNG: {mem.total / (1024**3):.2f} GB 🔥🔥🔥")
+    except:
+        pass
+
 @app.on_event("startup")
 async def startup_check():
+    print("--- SERVER STARTUP ---")
+    log_memory() # <--- KIỂM TRA NGAY TẠI ĐÂY
+    
     if not os.path.exists(FONT_BOLD): system_download(CDN_BOLD, FONT_BOLD)
     if not os.path.exists(FONT_REG): system_download(CDN_REG, FONT_REG)
 
@@ -67,28 +91,14 @@ def get_ready_font():
         return FONT_BOLD, FONT_REG if os.path.exists(FONT_REG) else FONT_BOLD
     return None, None
 
-# === HÀM KHÁM SỨC KHỎE VIDEO (MỚI) ===
 def probe_video(filepath):
-    """Dùng ffprobe để xem thông tin video"""
     try:
-        print(f"--- ĐANG KIỂM TRA FILE: {filepath} ---")
-        cmd = [
-            "ffprobe", 
-            "-v", "error", 
-            "-select_streams", "v:0", 
-            "-show_entries", "stream=width,height,codec_name,bit_rate", 
-            "-of", "json", 
-            filepath
-        ]
+        print(f"--- CHECK FILE: {filepath} ---")
+        cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,codec_name,bit_rate", "-of", "json", filepath]
         result = subprocess.run(cmd, capture_output=True, text=True)
-        data = json.loads(result.stdout)
-        print(f"THÔNG SỐ VIDEO: {data}")
-        return data
-    except Exception as e:
-        print(f"Lỗi Probe: {e}")
-        return None
+        print(f"INFO: {result.stdout}")
+    except: pass
 
-# ... (Giữ nguyên các hàm vẽ Text Overlay cũ) ...
 def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max_width, line_height):
     COLOR_HIGHLIGHT = (204, 0, 0, 255) 
     COLOR_NORMAL = (0, 0, 0, 255)      
@@ -220,7 +230,7 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
 def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
     return HTTPException(status_code=200, detail="OK")
 
-# === SHORTS LIST (V30 - DEBUG MODE) ===
+# === SHORTS LIST (V31 - SYSTEM MONITOR) ===
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
     req_id = str(uuid.uuid4())
@@ -236,30 +246,28 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
     try:
         download_file_req(request.video_url, input_video)
         download_file_req(request.audio_url, input_audio)
-        
-        # --- BƯỚC KHÁM SỨC KHỎE (Check Log Railway xem kết quả) ---
-        probe_video(input_video)
+        probe_video(input_video) # In info video ra log
         
         create_list_overlay(request.header_text, request.list_content, overlay_img)
 
-        # BƯỚC 1: RESIZE ĐƠN GIẢN (BỎ CROP)
-        # Sử dụng scale=540:-2 (Chỉ ép chiều ngang, chiều dọc tự tính)
-        # Cách này an toàn nhất, tránh lỗi tính toán bộ nhớ của bộ lọc Crop
-        print("-> BƯỚC 1: Hạ cấp video (Simple Scale)...")
+        # BƯỚC 1: RESIZE (THÊM pix_fmt để tránh lỗi codec lạ)
+        print("-> BƯỚC 1: Hạ cấp video...")
         cmd_normalize = [
             "ffmpeg",
             "-threads", "1", 
             "-i", input_video,
             "-t", str(request.duration), 
-            "-vf", "scale=540:-2", # <-- ĐỔI SANG CÁCH NÀY
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+            "-vf", "scale=540:-2", # Chỉ ép chiều ngang
+            "-c:v", "libx264", 
+            "-preset", "ultrafast", 
+            "-pix_fmt", "yuv420p", # <-- QUAN TRỌNG: Ép về hệ màu chuẩn, tránh lỗi file lạ
             "-an",
             "-y", normalized_bg
         ]
         subprocess.run(cmd_normalize, check=True)
 
-        # BƯỚC 2: LOOP & GHÉP
-        print("-> BƯỚC 2: Loop & Ghép Overlay...")
+        # BƯỚC 2: GHÉP
+        print("-> BƯỚC 2: Ghép final...")
         cmd_merge = [
             "ffmpeg",
             "-threads", "4", 
@@ -283,8 +291,5 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
         return FileResponse(output_file, media_type='video/mp4', filename="list_short.mp4")
     except Exception as e:
         cleanup_files(files_to_clean)
-        print(f"LỖI RENDER: {e}")
-        # In thêm thông tin để debug
-        import traceback
-        traceback.print_exc()
+        print(f"LỖI: {e}")
         raise HTTPException(status_code=400, detail=f"Lỗi: {str(e)}")
