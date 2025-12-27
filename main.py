@@ -6,6 +6,7 @@ import shutil
 import urllib3
 import textwrap
 import gc
+import json
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -66,6 +67,28 @@ def get_ready_font():
         return FONT_BOLD, FONT_REG if os.path.exists(FONT_REG) else FONT_BOLD
     return None, None
 
+# === HÀM KHÁM SỨC KHỎE VIDEO (MỚI) ===
+def probe_video(filepath):
+    """Dùng ffprobe để xem thông tin video"""
+    try:
+        print(f"--- ĐANG KIỂM TRA FILE: {filepath} ---")
+        cmd = [
+            "ffprobe", 
+            "-v", "error", 
+            "-select_streams", "v:0", 
+            "-show_entries", "stream=width,height,codec_name,bit_rate", 
+            "-of", "json", 
+            filepath
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        data = json.loads(result.stdout)
+        print(f"THÔNG SỐ VIDEO: {data}")
+        return data
+    except Exception as e:
+        print(f"Lỗi Probe: {e}")
+        return None
+
+# ... (Giữ nguyên các hàm vẽ Text Overlay cũ) ...
 def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max_width, line_height):
     COLOR_HIGHLIGHT = (204, 0, 0, 255) 
     COLOR_NORMAL = (0, 0, 0, 255)      
@@ -181,12 +204,10 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
             try: subprocess.run(["ffmpeg", "-threads", "2", "-i", input_video, "-filter_complex", "[0:v]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-y", pingpong_video], check=True)
             except: pass
             final_input_video = pingpong_video
-        
         has_sub = False
         if request.subtitle_content and len(request.subtitle_content.strip()) > 0:
             with open(subtitle_file, "w", encoding="utf-8") as f: f.write(request.subtitle_content)
             has_sub = True
-        
         cmd = ["ffmpeg", "-threads", "2", "-stream_loop", "-1", "-i", final_input_video, "-i", input_audio, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", "-y", output_file]
         subprocess.run(cmd, check=True)
         background_tasks.add_task(cleanup_files, files_to_clean)
@@ -199,7 +220,7 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
 def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
     return HTTPException(status_code=200, detail="OK")
 
-# === SHORTS LIST (V29 - REORDERED LOGIC) ===
+# === SHORTS LIST (V30 - DEBUG MODE) ===
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
     req_id = str(uuid.uuid4())
@@ -215,34 +236,35 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
     try:
         download_file_req(request.video_url, input_video)
         download_file_req(request.audio_url, input_audio)
+        
+        # --- BƯỚC KHÁM SỨC KHỎE (Check Log Railway xem kết quả) ---
+        probe_video(input_video)
+        
         create_list_overlay(request.header_text, request.list_content, overlay_img)
 
-        # BƯỚC 1: RESIZE TRƯỚC (QUAN TRỌNG: KHÔNG LOOP Ở ĐÂY)
-        # Chỉ xử lý đúng 1 lần video gốc, ép nó về 540p.
-        # Nếu video gốc 4K, nó sẽ bị bóp nhỏ ngay lập tức -> RAM an toàn.
-        # Dùng -threads 1 ở đây để an toàn nhất cho việc decode 4K.
-        print("-> BƯỚC 1: Hạ cấp video gốc (1 luồng)...")
+        # BƯỚC 1: RESIZE ĐƠN GIẢN (BỎ CROP)
+        # Sử dụng scale=540:-2 (Chỉ ép chiều ngang, chiều dọc tự tính)
+        # Cách này an toàn nhất, tránh lỗi tính toán bộ nhớ của bộ lọc Crop
+        print("-> BƯỚC 1: Hạ cấp video (Simple Scale)...")
         cmd_normalize = [
             "ffmpeg",
             "-threads", "1", 
             "-i", input_video,
-            "-t", str(request.duration), # Nếu video gốc dài hơn duration thì cắt bớt
-            "-vf", "scale=540:960:force_original_aspect_ratio=increase,crop=540:960",
+            "-t", str(request.duration), 
+            "-vf", "scale=540:-2", # <-- ĐỔI SANG CÁCH NÀY
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
             "-an",
             "-y", normalized_bg
         ]
         subprocess.run(cmd_normalize, check=True)
 
-        # BƯỚC 2: LOOP & GHÉP SAU (An toàn)
-        # Lúc này `normalized_bg` đã là video nhỏ (540p).
-        # Ta có thể loop thoải mái mà không sợ tốn RAM.
+        # BƯỚC 2: LOOP & GHÉP
         print("-> BƯỚC 2: Loop & Ghép Overlay...")
         cmd_merge = [
             "ffmpeg",
-            "-threads", "4", # Bước này nhẹ, bung lụa 4 luồng
-            "-stream_loop", "-1",     # LOOP Ở ĐÂY LÀ AN TOÀN
-            "-i", normalized_bg,      # Input đã nhỏ
+            "-threads", "4", 
+            "-stream_loop", "-1",     
+            "-i", normalized_bg,      
             "-i", input_audio,
             "-i", overlay_img,
             "-filter_complex", 
@@ -252,7 +274,7 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
             "-c:v", "libx264", 
             "-preset", "ultrafast",
             "-c:a", "aac",
-            "-t", str(request.duration), # Cắt đúng thời lượng lần cuối
+            "-t", str(request.duration),
             "-y", output_file
         ]
         subprocess.run(cmd_merge, check=True)
@@ -262,4 +284,7 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
     except Exception as e:
         cleanup_files(files_to_clean)
         print(f"LỖI RENDER: {e}")
+        # In thêm thông tin để debug
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=400, detail=f"Lỗi: {str(e)}")
