@@ -19,27 +19,31 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = FastAPI()
 
-# === CẤU HÌNH FONT (QUAN TRỌNG: LẤY ĐƯỜNG DẪN TUYỆT ĐỐI) ===
-# Trên Railway/Docker, thư mục hiện tại thường là /app
-CURRENT_DIR = os.getcwd() 
-FONT_BOLD_NAME = "Lora-Bold.ttf"
-FONT_REG_NAME = "Lora-Regular.ttf"
+# === CẤU HÌNH FONT LORA (GOOGLE) ===
+FONT_BOLD_PATH = "/tmp/Lora-Bold.ttf"
+FONT_REG_PATH = "/tmp/Lora-Regular.ttf"
 
-# Đường dẫn tuyệt đối (Ví dụ: /app/Lora-Bold.ttf)
-ABS_PATH_BOLD = os.path.join(CURRENT_DIR, FONT_BOLD_NAME)
-ABS_PATH_REG = os.path.join(CURRENT_DIR, FONT_REG_NAME)
+# Link GitHub Raw chính chủ
+URL_BOLD = "https://github.com/google/fonts/raw/main/ofl/lora/static/Lora-Bold.ttf"
+URL_REG = "https://github.com/google/fonts/raw/main/ofl/lora/static/Lora-Regular.ttf"
+
+def download_font_force(url, save_path):
+    if os.path.exists(save_path) and os.path.getsize(save_path) > 20000:
+        return
+    print(f"⬇️ Đang tải font: {os.path.basename(save_path)}...")
+    try:
+        r = requests.get(url, stream=True, verify=False, timeout=30)
+        if r.status_code == 200:
+            with open(save_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print("✅ Tải font OK")
+    except: pass
 
 @app.on_event("startup")
 async def startup_check():
-    print(f"--- THƯ MỤC HIỆN TẠI: {CURRENT_DIR} ---")
-    print(f"--- ĐANG TÌM FONT TẠI: {ABS_PATH_BOLD} ---")
-    
-    if os.path.exists(ABS_PATH_BOLD):
-        print(f"✅ ĐÃ TÌM THẤY FONT BOLD: {os.path.getsize(ABS_PATH_BOLD)} bytes")
-    else:
-        print(f"❌ KHÔNG THẤY FONT BOLD TẠI {ABS_PATH_BOLD}")
-        # Liệt kê file để debug
-        print(f"Danh sách file: {os.listdir(CURRENT_DIR)}")
+    download_font_force(URL_BOLD, FONT_BOLD_PATH)
+    download_font_force(URL_REG, FONT_REG_PATH)
 
 class MergeRequest(BaseModel):
     video_url: str = ""
@@ -65,10 +69,7 @@ def cleanup_files(files):
 
 def system_download(url, filename):
     try:
-        # Giả lập Chrome để tải file (đặc biệt là Airtable)
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
+        headers = {'User-Agent': 'Mozilla/5.0'}
         with requests.get(url, headers=headers, stream=True, verify=False, timeout=60) as r:
             if r.status_code != 200: return False
             with open(filename, 'wb') as f:
@@ -81,28 +82,30 @@ def download_file_req(url, filename):
     if not url: return False
     return system_download(url, filename)
 
-def get_font_objects(size_header, size_body):
-    """Load font từ đường dẫn tuyệt đối"""
+# === HÀM LẤY KÍCH THƯỚC VIDEO GỐC ===
+def get_video_dimensions(filepath):
+    """Trả về (width, height) của video"""
     try:
-        # Nếu tìm thấy file Lora Bold thì dùng, không thì fallback
-        if os.path.exists(ABS_PATH_BOLD):
-            font_header = ImageFont.truetype(ABS_PATH_BOLD, size_header)
-            font_body_bold = ImageFont.truetype(ABS_PATH_BOLD, size_body)
-            # Check Regular
-            path_reg = ABS_PATH_REG if os.path.exists(ABS_PATH_REG) else ABS_PATH_BOLD
-            font_body_reg = ImageFont.truetype(path_reg, size_body)
-            return font_header, font_body_bold, font_body_reg
-        else:
-            print("⚠️ Không thấy font Lora, dùng Default")
-            return ImageFont.load_default(), ImageFont.load_default(), ImageFont.load_default()
+        cmd = [
+            "ffprobe", "-v", "error", 
+            "-select_streams", "v:0", 
+            "-show_entries", "stream=width,height", 
+            "-of", "json", filepath
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        data = json.loads(result.stdout)
+        width = data['streams'][0]['width']
+        height = data['streams'][0]['height']
+        print(f"📐 Kích thước Video gốc: {width}x{height}")
+        return width, height
     except Exception as e:
-        print(f"⚠️ Lỗi load font: {e}")
-        return ImageFont.load_default(), ImageFont.load_default(), ImageFont.load_default()
+        print(f"⚠️ Lỗi probe video: {e}. Dùng mặc định 1080x1920")
+        return 1080, 1920 # Fallback an toàn
 
+# === VẼ TEXT (DYNAMIC SIZE) ===
 def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max_width, line_height):
-    COLOR_HIGHLIGHT = (204, 0, 0, 255) # Đỏ đậm
-    COLOR_NORMAL = (0, 0, 0, 255)      # Đen
-    
+    COLOR_HIGHLIGHT = (204, 0, 0, 255) 
+    COLOR_NORMAL = (0, 0, 0, 255)      
     if ":" in text:
         parts = text.split(":", 1)
         part_bold = parts[0] + ":"
@@ -110,25 +113,18 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
     else:
         part_bold = ""
         part_reg = text
-
     current_x = x_start
     current_y = y_start
-    
-    # Vẽ phần Bold
     if part_bold:
         words = part_bold.split()
         for i, word in enumerate(words):
             suffix = " " if i < len(words) else "" 
             word_w = draw.textlength(word + suffix, font=font_bold)
-            
             if current_x + word_w > x_start + max_width:
                 current_x = x_start
                 current_y += line_height
-            
             draw.text((current_x, current_y), word, font=font_bold, fill=COLOR_HIGHLIGHT)
             current_x += word_w
-
-    # Vẽ phần Regular
     if part_reg:
         words = part_reg.split()
         if part_bold and current_x > x_start:
@@ -137,7 +133,6 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
         for i, word in enumerate(words):
             word_w = draw.textlength(word, font=font_reg)
             space_w = draw.textlength(" ", font=font_reg)
-            
             if current_x + word_w > x_start + max_width:
                 current_x = x_start
                 current_y += line_height
@@ -147,63 +142,75 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
                 draw.text((current_x, current_y), word, font=font_reg, fill=COLOR_NORMAL)
                 current_x += word_w
             if i < len(words) - 1: current_x += space_w
-
     return current_y + line_height
 
-def create_list_overlay(header, content, output_img_path):
-    # Canvas 540x960 (9:16)
-    W, H = 540, 960 
-    img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+def create_list_overlay(header, content, output_img_path, target_w, target_h):
+    # Tạo Canvas khớp 100% với video gốc
+    img = Image.new('RGBA', (target_w, target_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
-    # === CẤU HÌNH SIZE CHỮ TO (X2 so với cũ) ===
-    # Lúc trước 26 bé quá, giờ tăng lên 40 cho body
-    FONT_SIZE_HEADER = 50 
-    FONT_SIZE_BODY = 40   
+    # === CÔNG THỨC TÍNH CỠ CHỮ TỰ ĐỘNG ===
+    # Header chiếm khoảng 8% chiều rộng video
+    # Body chiếm khoảng 5.5% chiều rộng video
+    FONT_SIZE_HEADER = int(target_w * 0.08) 
+    FONT_SIZE_BODY = int(target_w * 0.055)
     
-    # Load Font Tuyệt đối
-    font_header, font_body_bold, font_body_reg = get_font_objects(FONT_SIZE_HEADER, FONT_SIZE_BODY)
+    # Đảm bảo không quá bé
+    if FONT_SIZE_HEADER < 20: FONT_SIZE_HEADER = 20
+    if FONT_SIZE_BODY < 14: FONT_SIZE_BODY = 14
+
+    print(f"🔠 Font Size Dynamic: Header={FONT_SIZE_HEADER}, Body={FONT_SIZE_BODY}")
+
+    try:
+        font_header = ImageFont.truetype(FONT_BOLD_PATH, FONT_SIZE_HEADER)
+        font_body_bold = ImageFont.truetype(FONT_BOLD_PATH, FONT_SIZE_BODY)
+        font_body_reg = ImageFont.truetype(FONT_REG_PATH, FONT_SIZE_BODY)
+    except:
+        font_header = ImageFont.load_default()
+        font_body_bold = ImageFont.load_default()
+        font_body_reg = ImageFont.load_default()
 
     clean_header = header.replace("\\n", "\n").replace("\\N", "\n")
     clean_content = content.replace("\\n", "\n").replace("\\N", "\n")
 
-    # Tăng lề (padding) để chữ không sát mép
-    box_width = 500
-    padding_x = 20 
+    # Box rộng 90% video, căn giữa
+    box_width = int(target_w * 0.9)
+    padding_x = int(target_w * 0.04) # Padding 4%
     max_text_width = box_width - (padding_x * 2)
 
     import textwrap
     header_lines = []
-    # Wrap text chặt hơn vì chữ to ra
+    # Tính toán số ký tự wrap dựa trên độ rộng (ước lượng)
+    chars_per_line = int(max_text_width / (FONT_SIZE_HEADER * 0.55)) 
     for line in clean_header.split('\n'):
-        header_lines.extend(textwrap.wrap(line.strip().upper(), width=15))
+        header_lines.extend(textwrap.wrap(line.strip().upper(), width=chars_per_line))
 
     line_height_header = int(FONT_SIZE_HEADER * 1.2)
-    line_height_body = int(FONT_SIZE_BODY * 1.3)
-    spacing_header_body = 30 
-    padding_y = 30
+    line_height_body = int(FONT_SIZE_BODY * 1.35)
+    spacing_header_body = int(target_h * 0.03) # Cách nhau 3% chiều cao
+    padding_y = int(target_h * 0.04)
     
     h_header = len(header_lines) * line_height_header
     
-    # Tính chiều cao Body
     temp_y = 0
     body_items = clean_content.split('\n')
     dummy_draw = ImageDraw.Draw(Image.new('RGBA', (1, 1)))
     for item in body_items:
         if not item.strip(): continue
         temp_y = draw_highlighted_line(dummy_draw, 0, temp_y, item, font_body_bold, font_body_reg, max_text_width, line_height_body)
-        temp_y += 15 
+        temp_y += int(target_h * 0.015) # Spacing item
     
     h_body = temp_y
     box_height = padding_y + h_header + spacing_header_body + h_body + padding_y
     
-    # Căn giữa Box
-    box_x = (W - box_width) // 2
-    box_y = (H - box_height) // 2
+    box_x = (target_w - box_width) // 2
+    box_y = (target_h - box_height) // 2
     
-    # Vẽ nền trắng mờ
+    # Vẽ Box Trắng
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], fill=(255, 255, 255, 245), outline=None)
-    draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], outline=(200, 200, 200, 150), width=3)
+    border_w = int(target_w * 0.005) # Border dày 0.5%
+    if border_w < 1: border_w = 1
+    draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], outline=(200, 200, 200, 150), width=border_w)
 
     # Vẽ Header
     current_y = box_y + padding_y
@@ -219,7 +226,7 @@ def create_list_overlay(header, content, output_img_path):
     for item in body_items:
         if not item.strip(): continue
         current_y = draw_highlighted_line(draw, start_x, current_y, item, font_body_bold, font_body_reg, max_text_width, line_height_body)
-        current_y += 15
+        current_y += int(target_h * 0.015)
 
     img.save(output_img_path)
 
@@ -235,17 +242,12 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
     try:
         download_file_req(request.video_url, input_video)
         download_file_req(request.audio_url, input_audio)
-        path_bold = ABS_PATH_BOLD if os.path.exists(ABS_PATH_BOLD) else "Arial"
-        font_path = path_bold
+        font_path = "Arial"
         final_input_video = input_video
         if request.ping_pong:
             try: subprocess.run(["ffmpeg", "-threads", "1", "-i", input_video, "-filter_complex", "[0:v]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-y", pingpong_video], check=True)
             except: pass
             final_input_video = pingpong_video
-        has_sub = False
-        if request.subtitle_content and len(request.subtitle_content.strip()) > 0:
-            with open(subtitle_file, "w", encoding="utf-8") as f: f.write(request.subtitle_content)
-            has_sub = True
         cmd = ["ffmpeg", "-threads", "1", "-stream_loop", "-1", "-i", final_input_video, "-i", input_audio, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", "-y", output_file]
         subprocess.run(cmd, check=True)
         background_tasks.add_task(cleanup_files, files_to_clean)
@@ -258,62 +260,58 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
 def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
     return HTTPException(status_code=200, detail="OK")
 
+# === SHORTS LIST (V42 - DYNAMIC RESOLUTION) ===
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
     req_id = str(uuid.uuid4())
     input_video = f"{req_id}_bg.mp4"
     input_audio = f"{req_id}_a.mp3"
     overlay_img = f"{req_id}_over.png"
-    normalized_bg = f"{req_id}_norm.mp4"
     output_file = f"{req_id}_short.mp4"
-    files_to_clean = [input_video, input_audio, overlay_img, normalized_bg, output_file]
+    files_to_clean = [input_video, input_audio, overlay_img, output_file]
 
     try:
-        # Tải File (Airtable Safe)
+        # 1. Tải file
         vid_ok = download_file_req(request.video_url, input_video)
         aud_ok = download_file_req(request.audio_url, input_audio)
         
-        # Vẽ Overlay (Font Lora Absolute Path + Size To)
-        create_list_overlay(request.header_text, request.list_content, overlay_img)
-
-        # Xử lý Video Nền
-        bg_ready = False
+        # 2. ĐỌC KÍCH THƯỚC VIDEO GỐC
+        target_w, target_h = 1080, 1920 # Mặc định
         if vid_ok:
-            try:
-                # Resize về 540p trước
-                subprocess.run([
-                    "ffmpeg", "-threads", "1", "-y", 
-                    "-i", input_video, 
-                    "-t", str(request.duration),
-                    "-vf", "scale=540:-2", 
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-an", 
-                    normalized_bg
-                ], check=True)
-                bg_ready = True
-            except:
-                print("⚠️ Lỗi resize -> Dùng nền đen")
+            target_w, target_h = get_video_dimensions(input_video)
         
-        if not bg_ready:
-            subprocess.run([
-                "ffmpeg", "-f", "lavfi", "-i", f"color=c=black:s=540x960:r=30", 
-                "-t", str(request.duration),
-                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-y", 
-                normalized_bg
-            ], check=True)
+        # 3. TẠO OVERLAY KHỚP KÍCH THƯỚC ĐÓ
+        # Hàm này giờ đã thông minh, tự tính size chữ theo target_w
+        create_list_overlay(request.header_text, request.list_content, overlay_img, target_w, target_h)
 
-        # Ghép Final
-        subprocess.run([
-            "ffmpeg", "-threads", "4", 
-            "-stream_loop", "-1", 
-            "-i", normalized_bg, 
-            "-i", input_audio, 
-            "-i", overlay_img, 
-            "-filter_complex", "[0:v][2:v]overlay=0:0[v]", 
-            "-map", "[v]", "-map", "1:a", 
-            "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", 
-            "-t", str(request.duration), "-y", 
-            output_file
-        ], check=True)
+        # 4. GHÉP FINAL (KHÔNG RESIZE)
+        # Giữ nguyên chất lượng video gốc
+        print(f"-> Ghép Overlay vào video {target_w}x{target_h}...")
+        
+        if vid_ok:
+            subprocess.run([
+                "ffmpeg", "-threads", "4", 
+                "-i", input_video,   
+                "-i", input_audio,   
+                "-i", overlay_img,   
+                "-filter_complex", "[0:v][2:v]overlay=0:0[v]", 
+                "-map", "[v]", "-map", "1:a", 
+                "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", 
+                "-t", str(request.duration), "-y", 
+                output_file
+            ], check=True)
+        else:
+             # Fallback nền đen nếu không tải được video
+            subprocess.run([
+                "ffmpeg", "-loop", "1", "-y",
+                "-i", overlay_img,
+                "-i", input_audio,
+                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", 
+                "-t", str(request.duration), 
+                "-shortest", 
+                output_file
+            ], check=True)
 
         background_tasks.add_task(cleanup_files, files_to_clean)
         return FileResponse(output_file, media_type='video/mp4', filename="list_short.mp4")
