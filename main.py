@@ -25,7 +25,7 @@ CDN_REG = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Regular
 
 def system_download(url, filename):
     try:
-        subprocess.run(["curl", "-L", "-k", "-o", filename, url], check=True, timeout=30)
+        subprocess.run(["curl", "-L", "-k", "-o", filename, url], check=True, timeout=60)
         if os.path.exists(filename) and os.path.getsize(filename) > 5000: return True
     except: pass
     return False
@@ -164,7 +164,6 @@ def create_list_overlay(header, content, output_img_path):
 
 @app.post("/merge")
 def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
-    # GIỮ NGUYÊN CODE CŨ
     req_id = str(uuid.uuid4())
     input_video = f"{req_id}_v.mp4"
     pingpong_video = f"{req_id}_pp.mp4"
@@ -179,7 +178,7 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
         font_path = path_bold if path_bold else "Arial"
         final_input_video = input_video
         if request.ping_pong:
-            try: subprocess.run(["ffmpeg", "-threads", "1", "-i", input_video, "-filter_complex", "[0:v]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-y", pingpong_video], check=True)
+            try: subprocess.run(["ffmpeg", "-threads", "2", "-i", input_video, "-filter_complex", "[0:v]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-y", pingpong_video], check=True)
             except: pass
             final_input_video = pingpong_video
         
@@ -188,7 +187,7 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
             with open(subtitle_file, "w", encoding="utf-8") as f: f.write(request.subtitle_content)
             has_sub = True
         
-        cmd = ["ffmpeg", "-threads", "1", "-stream_loop", "-1", "-i", final_input_video, "-i", input_audio, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", "-y", output_file]
+        cmd = ["ffmpeg", "-threads", "2", "-stream_loop", "-1", "-i", final_input_video, "-i", input_audio, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", "-y", output_file]
         subprocess.run(cmd, check=True)
         background_tasks.add_task(cleanup_files, files_to_clean)
         return FileResponse(output_file, media_type='video/mp4', filename="short.mp4")
@@ -200,47 +199,68 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
 def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
     return HTTPException(status_code=200, detail="OK")
 
+# === SHORTS LIST (V28 - 2-STEP PROCESSING) ===
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
     req_id = str(uuid.uuid4())
     input_video = f"{req_id}_bg.mp4"
     input_audio = f"{req_id}_a.mp3"
     overlay_img = f"{req_id}_over.png"
+    
+    # File trung gian đã xử lý sạch sẽ
+    normalized_bg = f"{req_id}_norm.mp4"
     output_file = f"{req_id}_short.mp4"
-    files_to_clean = [input_video, input_audio, overlay_img, output_file]
+    
+    files_to_clean = [input_video, input_audio, overlay_img, normalized_bg, output_file]
 
     try:
         download_file_req(request.video_url, input_video)
         download_file_req(request.audio_url, input_audio)
+        
         create_list_overlay(request.header_text, request.list_content, overlay_img)
 
-        # LỆNH FFMPEG V27: Ép size video nền về 540x960 TRƯỚC khi overlay
-        # Điều này giúp FFmpeg chỉ xử lý trên khung hình nhỏ, tiết kiệm RAM.
-        cmd = [
+        # BƯỚC 1: CHUẨN HÓA VIDEO NỀN
+        # Tách riêng bước này để không bị OOM khi decode file nặng
+        # Scale về 540x960 ngay lập tức
+        print("-> BƯỚC 1: Chuẩn hóa video nền...")
+        cmd_normalize = [
             "ffmpeg",
-            "-threads", "1",
+            "-threads", "4", # Tận dụng 8 vCPU
+            "-y",
             "-stream_loop", "-1",
-            "-i", input_video,      
-            "-i", input_audio,
-            "-i", overlay_img,
+            "-i", input_video,
+            "-t", str(request.duration),
+            "-vf", "scale=540:960:force_original_aspect_ratio=increase,crop=540:960",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+            "-an",
+            normalized_bg
+        ]
+        subprocess.run(cmd_normalize, check=True)
+
+        # BƯỚC 2: GHÉP NHẸ NHÀNG
+        # Input giờ là file sạch 540p, ghép cực nhanh
+        print("-> BƯỚC 2: Ghép final...")
+        cmd_merge = [
+            "ffmpeg",
+            "-threads", "4",
+            "-y",
+            "-i", normalized_bg,   
+            "-i", input_audio,     
+            "-i", overlay_img,     
             "-filter_complex", 
-            # Dòng này quan trọng: Scale & Crop video nền về 540x960 ngay lập tức
-            # Dù input là 4K thì nó cũng bị bóp nhỏ lại trước khi dán ảnh
-            f"[0:v]scale=540:960:force_original_aspect_ratio=increase,crop=540:960:(iw-ow)/2:(ih-oh)/2[bg];[bg][2:v]overlay=0:0[v]",
-            "-map", "[v]", "-map", "1:a",
+            "[0:v][2:v]overlay=0:0[v]", 
+            "-map", "[v]", 
+            "-map", "1:a",
             "-c:v", "libx264", 
             "-preset", "ultrafast",
-            "-crf", "28",
-            "-max_muxing_queue_size", "1024",
             "-c:a", "aac",
-            "-t", str(request.duration),
-            "-y",
             output_file
         ]
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd_merge, check=True)
+
         background_tasks.add_task(cleanup_files, files_to_clean)
         return FileResponse(output_file, media_type='video/mp4', filename="list_short.mp4")
     except Exception as e:
         cleanup_files(files_to_clean)
-        print(f"LỖI: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        print(f"LỖI RENDER: {e}")
+        raise HTTPException(status_code=400, detail=f"Lỗi: {str(e)}")
