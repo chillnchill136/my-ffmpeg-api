@@ -8,6 +8,7 @@ import json
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from typing import Optional
 from PIL import Image, ImageDraw, ImageFont, features
 
 # Tắt cảnh báo SSL
@@ -19,40 +20,45 @@ app = FastAPI()
 # ==========================================
 # 1. CẤU HÌNH FONT & HỆ THỐNG
 # ==========================================
-# Thư mục font hệ thống
 FONT_DIR = "/app/fonts"
 if not os.path.exists(FONT_DIR): os.makedirs(FONT_DIR, exist_ok=True)
 
 FONT_BOLD_PATH = os.path.join(FONT_DIR, "Lora-Bold.ttf")
 FONT_REG_PATH = os.path.join(FONT_DIR, "Lora-Regular.ttf")
 
-# Link Google Font Chính Chủ
-URL_BOLD = "https://github.com/google/fonts/raw/main/ofl/lora/static/Lora-Bold.ttf"
-URL_REG = "https://github.com/google/fonts/raw/main/ofl/lora/static/Lora-Regular.ttf"
+# LINK TẢI FONT CHUẨN TỪ REPO TÁC GIẢ (CYREAL)
+URL_BOLD = "https://github.com/cyrealtype/Lora-Cyrillic/raw/main/fonts/ttf/Lora-Bold.ttf"
+URL_REG = "https://github.com/cyrealtype/Lora-Cyrillic/raw/main/fonts/ttf/Lora-Regular.ttf"
 
 def download_font_force():
-    """Tải font về hệ thống để dùng cho cả Pillow và FFmpeg"""
+    """Tải font về hệ thống (Force Download nếu file < 10KB)"""
     print("--- CHECKING FONTS ---")
     try:
         # Tải Bold
         if not os.path.exists(FONT_BOLD_PATH) or os.path.getsize(FONT_BOLD_PATH) < 10000:
-            print(f"⬇️ Đang tải Lora-Bold...")
+            print(f"⬇️ Đang tải Lora-Bold từ Cyreal...")
             r = requests.get(URL_BOLD, timeout=30)
-            with open(FONT_BOLD_PATH, 'wb') as f: f.write(r.content)
+            if r.status_code == 200:
+                with open(FONT_BOLD_PATH, 'wb') as f: f.write(r.content)
+            else:
+                print(f"❌ Lỗi HTTP {r.status_code} khi tải Bold")
         
         # Tải Regular
         if not os.path.exists(FONT_REG_PATH) or os.path.getsize(FONT_REG_PATH) < 10000:
-            print(f"⬇️ Đang tải Lora-Regular...")
+            print(f"⬇️ Đang tải Lora-Regular từ Cyreal...")
             r = requests.get(URL_REG, timeout=30)
-            with open(FONT_REG_PATH, 'wb') as f: f.write(r.content)
+            if r.status_code == 200:
+                with open(FONT_REG_PATH, 'wb') as f: f.write(r.content)
+            else:
+                print(f"❌ Lỗi HTTP {r.status_code} khi tải Regular")
             
-        print("✅ Fonts Ready!")
+        print("✅ Fonts Check Done!")
     except Exception as e:
         print(f"❌ Lỗi tải font: {e}")
 
 @app.on_event("startup")
 async def startup_check():
-    # Check thư viện FreeType (Bắt buộc để vẽ chữ đẹp)
+    # Check thư viện FreeType
     has_freetype = features.check('freetype2')
     print(f"🖥️ FREETYPE SUPPORT: {has_freetype}")
     if not has_freetype:
@@ -69,7 +75,7 @@ class MergeRequest(BaseModel):
     audio_url: str
     keyword: Optional[str] = ""
     subtitle_content: Optional[str] = ""
-    ping_pong: Optional[bool] = True # <--- Logic PingPong cũ vẫn ở đây
+    ping_pong: Optional[bool] = True
 
 class ShortsRequest(BaseModel):
     video_url: str
@@ -98,6 +104,7 @@ def download_file(url, filename):
     return False
 
 def get_video_dimensions(filepath):
+    """Lấy kích thước video gốc"""
     try:
         cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", filepath]
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -116,11 +123,13 @@ def get_font_objects(size_header, size_body):
         font_body_reg = ImageFont.truetype(FONT_REG_PATH, size_body)
         return font_header, font_body_bold, font_body_reg
     except:
+        # Nếu lỗi thì dùng Default (chấp nhận xấu còn hơn crash)
         return ImageFont.load_default(), ImageFont.load_default(), ImageFont.load_default()
 
 def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max_width, line_height):
     COLOR_HIGHLIGHT = (204, 0, 0, 255) 
     COLOR_NORMAL = (0, 0, 0, 255)      
+    
     if ":" in text:
         parts = text.split(":", 1)
         part_bold = parts[0] + ":"
@@ -128,8 +137,10 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
     else:
         part_bold = ""
         part_reg = text
+
     current_x = x_start
     current_y = y_start
+    
     if part_bold:
         words = part_bold.split()
         for i, word in enumerate(words):
@@ -140,6 +151,7 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
                 current_y += line_height
             draw.text((current_x, current_y), word, font=font_bold, fill=COLOR_HIGHLIGHT)
             current_x += word_w
+
     if part_reg:
         words = part_reg.split()
         if part_bold and current_x > x_start:
@@ -157,6 +169,7 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
                 draw.text((current_x, current_y), word, font=font_reg, fill=COLOR_NORMAL)
                 current_x += word_w
             if i < len(words) - 1: current_x += space_w
+            
     return current_y + line_height
 
 def create_list_overlay(header, content, output_img_path, target_w, target_h):
@@ -229,28 +242,20 @@ def create_list_overlay(header, content, output_img_path, target_w, target_h):
 # ==========================================
 @app.post("/merge")
 def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
-    """
-    API cũ dành cho Blog:
-    - Input: Video ngắn + Audio dài
-    - Logic: Ping-Pong Loop (Đi xuôi rồi đi ngược) liên tục cho khớp audio
-    """
     req_id = str(uuid.uuid4())
     input_video = f"{req_id}_v.mp4"
     pingpong_video = f"{req_id}_pp.mp4"
     input_audio = f"{req_id}_a.mp3"
     output_file = f"{req_id}_out.mp4"
-    
     clean_list = [input_video, pingpong_video, input_audio, output_file]
 
     try:
         download_file(request.video_url, input_video)
         download_file(request.audio_url, input_audio)
         
-        # 1. Tạo hiệu ứng Ping-Pong (Xuôi -> Ngược -> Xuôi...)
         final_input_video = input_video
         if request.ping_pong:
             try:
-                # Filter tạo video dài gấp đôi (Xuôi + Ngược)
                 subprocess.run([
                     "ffmpeg", "-threads", "2", "-y",
                     "-i", input_video, 
@@ -260,18 +265,17 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
                     pingpong_video
                 ], check=True)
                 final_input_video = pingpong_video
-            except: pass # Nếu lỗi thì dùng video gốc, không chết flow
+            except: pass 
 
-        # 2. Loop video ping-pong cho bằng độ dài audio (-shortest)
         cmd = [
             "ffmpeg", "-threads", "4", "-y",
-            "-stream_loop", "-1",       # Loop vô hạn
-            "-i", final_input_video,    # Video nền (đã ping-pong)
-            "-i", input_audio,          # Audio
+            "-stream_loop", "-1",       
+            "-i", final_input_video,    
+            "-i", input_audio,          
             "-map", "0:v", "-map", "1:a",
             "-c:v", "libx264", "-preset", "ultrafast", 
             "-c:a", "aac", 
-            "-shortest",                # Cắt khi hết audio
+            "-shortest",                
             output_file
         ]
         subprocess.run(cmd, check=True)
@@ -287,11 +291,6 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
 # ==========================================
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
-    """
-    API mới dành cho Shorts:
-    - Input: Video & Audio cùng độ dài (5s)
-    - Logic: Dynamic Resolution + Lora Font + Overlay
-    """
     req_id = str(uuid.uuid4())
     input_video = f"{req_id}_bg.mp4"
     input_audio = f"{req_id}_a.mp3"
@@ -303,14 +302,15 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
         vid_ok = download_file(request.video_url, input_video)
         aud_ok = download_file(request.audio_url, input_audio)
         
-        # Lấy size video để vẽ chữ cho đẹp
+        # 1. Lấy size video gốc (Để tính size chữ)
         target_w, target_h = 1080, 1920 
         if vid_ok:
             target_w, target_h = get_video_dimensions(input_video)
         
+        # 2. Tạo Overlay (Kích thước = Video gốc)
         create_list_overlay(request.header_text, request.list_content, overlay_img, target_w, target_h)
 
-        # Ghép (Không loop, vì input đã chuẩn 5s)
+        # 3. Ghép
         if vid_ok:
             subprocess.run([
                 "ffmpeg", "-threads", "4", "-y",
