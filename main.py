@@ -17,7 +17,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = FastAPI()
 
-# === CẤU HÌNH FONT ===
+# === CẤU HÌNH FONT & CDN ===
 FONT_BOLD = "Lora-Bold.ttf"
 FONT_REG = "Lora-Regular.ttf"
 CDN_BOLD = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Bold.ttf"
@@ -26,21 +26,21 @@ CDN_REG = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Regular
 # === HÀM TẢI HỆ THỐNG ===
 def system_download(url, filename):
     try:
-        # Thêm timeout ngắn để fail nhanh nếu mạng lag
-        subprocess.run(["curl", "-L", "-k", "-o", filename, url], check=True, timeout=30)
+        # Timeout 45s
+        subprocess.run(["curl", "-L", "-k", "-o", filename, url], check=True, timeout=45)
         if os.path.exists(filename) and os.path.getsize(filename) > 5000:
             return True
     except: pass
     return False
 
-# === STARTUP CHECK ===
+# === STARTUP CHECK (Tải Font Tự Động) ===
 @app.on_event("startup")
 async def startup_check():
-    # Tải font ngay khi khởi động
+    # Đảm bảo có font Lora
     if not os.path.exists(FONT_BOLD): system_download(CDN_BOLD, FONT_BOLD)
     if not os.path.exists(FONT_REG): system_download(CDN_REG, FONT_REG)
 
-# === MODEL ===
+# === MODEL DỮ LIỆU ===
 class MergeRequest(BaseModel):
     video_url: str = ""
     image_url: str = "" 
@@ -73,7 +73,7 @@ def get_ready_font():
         return FONT_BOLD, FONT_REG if os.path.exists(FONT_REG) else FONT_BOLD
     return None, None
 
-# === LOGIC VẼ TEXT (GIỮ NGUYÊN) ===
+# === LOGIC VẼ TEXT (Giữ nguyên style Highlight) ===
 def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max_width, line_height):
     COLOR_HIGHLIGHT = (204, 0, 0, 255) 
     COLOR_NORMAL = (0, 0, 0, 255)      
@@ -122,12 +122,14 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
 
 # === VẼ OVERLAY 540P ===
 def create_list_overlay(header, content, output_img_path):
+    # Setup Canvas 540x960 (Nhẹ)
     W, H = 540, 960 
     img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
     path_bold, path_reg = get_ready_font()
     
+    # Font size cho 540p
     FONT_SIZE_HEADER = 38
     FONT_SIZE_BODY = 26
     
@@ -197,10 +199,11 @@ def create_list_overlay(header, content, output_img_path):
     img.save(output_img_path)
 
 # ==========================================
-# API: MERGE (Giữ nguyên cho legacy flows)
+# CÁC API KHÁC
 # ==========================================
 @app.post("/merge")
 def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
+    # GIỮ NGUYÊN CODE CŨ
     req_id = str(uuid.uuid4())
     input_video = f"{req_id}_v.mp4"
     pingpong_video = f"{req_id}_pp.mp4"
@@ -218,10 +221,12 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
             try: subprocess.run(["ffmpeg", "-threads", "1", "-i", input_video, "-filter_complex", "[0:v]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-y", pingpong_video], check=True)
             except: pass
             final_input_video = pingpong_video
+        
         has_sub = False
         if request.subtitle_content and len(request.subtitle_content.strip()) > 0:
             with open(subtitle_file, "w", encoding="utf-8") as f: f.write(request.subtitle_content)
             has_sub = True
+        
         cmd = ["ffmpeg", "-threads", "1", "-stream_loop", "-1", "-i", final_input_video, "-i", input_audio, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", "-y", output_file]
         subprocess.run(cmd, check=True)
         background_tasks.add_task(cleanup_files, files_to_clean)
@@ -235,7 +240,7 @@ def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
     return HTTPException(status_code=200, detail="OK")
 
 # ==========================================
-# API: SHORTS LIST (V25 - Light Input Only)
+# API: SHORTS LIST (V26 - DIRECT OVERLAY)
 # ==========================================
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
@@ -249,25 +254,23 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
     try:
         download_file_req(request.video_url, input_video)
         download_file_req(request.audio_url, input_audio)
+        
+        # 1. Tạo Overlay (Size 540x960)
         create_list_overlay(request.header_text, request.list_content, overlay_img)
 
-        # QUAN TRỌNG:
-        # Code này giả định video đầu vào ĐÃ ĐƯỢC RESIZE ở bên ngoài về mức an toàn (ví dụ < 1080p).
-        # Nó sẽ KHÔNG cố gắng resize nữa để tiết kiệm RAM.
-        # Nó chỉ Crop về tỷ lệ 9:16 và dán ảnh.
+        # 2. Render KHÔNG RESIZE (Để tránh sập RAM)
+        # Giả định: Video đầu vào ĐÃ được resize về 540x960 (hoặc 720x1280) ở bên ngoài.
+        # Lệnh này chỉ đơn giản là Dán đè lên.
         
         cmd = [
             "ffmpeg",
             "-threads", "1",
             "-stream_loop", "-1",
-            "-i", input_video,
+            "-i", input_video,      # Input đã nhẹ
             "-i", input_audio,
             "-i", overlay_img,
             "-filter_complex", 
-            # Scale=540:960 nghĩa là: Ép cứng về kích thước này luôn.
-            # Nếu video vào là 4K, nó sẽ cố ép và có thể sập.
-            # Lời khuyên: Hãy gửi video vào đã là HD hoặc qHD.
-            f"[0:v]scale=540:960:force_original_aspect_ratio=increase,crop=540:960:(iw-ow)/2:(ih-oh)/2[bg];[bg][2:v]overlay=0:0[v]",
+            f"[0:v][2:v]overlay=0:0[v]", # Bỏ scale, bỏ crop. Chỉ overlay thôi.
             "-map", "[v]", "-map", "1:a",
             "-c:v", "libx264", 
             "-preset", "ultrafast",
