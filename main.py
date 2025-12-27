@@ -17,30 +17,24 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = FastAPI()
 
-# === CẤU HÌNH FONT & CDN ===
+# === CẤU HÌNH FONT ===
 FONT_BOLD = "Lora-Bold.ttf"
 FONT_REG = "Lora-Regular.ttf"
 CDN_BOLD = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Bold.ttf"
 CDN_REG = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Regular.ttf"
 
-# === HÀM TẢI HỆ THỐNG ===
 def system_download(url, filename):
     try:
-        # Timeout 45s
-        subprocess.run(["curl", "-L", "-k", "-o", filename, url], check=True, timeout=45)
-        if os.path.exists(filename) and os.path.getsize(filename) > 5000:
-            return True
+        subprocess.run(["curl", "-L", "-k", "-o", filename, url], check=True, timeout=30)
+        if os.path.exists(filename) and os.path.getsize(filename) > 5000: return True
     except: pass
     return False
 
-# === STARTUP CHECK (Tải Font Tự Động) ===
 @app.on_event("startup")
 async def startup_check():
-    # Đảm bảo có font Lora
     if not os.path.exists(FONT_BOLD): system_download(CDN_BOLD, FONT_BOLD)
     if not os.path.exists(FONT_REG): system_download(CDN_REG, FONT_REG)
 
-# === MODEL DỮ LIỆU ===
 class MergeRequest(BaseModel):
     video_url: str = ""
     image_url: str = "" 
@@ -56,7 +50,6 @@ class ShortsRequest(BaseModel):
     list_content: str = ""        
     duration: int = 5             
 
-# === HELPERS ===
 def cleanup_files(files):
     for f in files:
         if os.path.exists(f):
@@ -73,11 +66,9 @@ def get_ready_font():
         return FONT_BOLD, FONT_REG if os.path.exists(FONT_REG) else FONT_BOLD
     return None, None
 
-# === LOGIC VẼ TEXT (Giữ nguyên style Highlight) ===
 def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max_width, line_height):
     COLOR_HIGHLIGHT = (204, 0, 0, 255) 
     COLOR_NORMAL = (0, 0, 0, 255)      
-
     if ":" in text:
         parts = text.split(":", 1)
         part_bold = parts[0] + ":"
@@ -85,10 +76,8 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
     else:
         part_bold = ""
         part_reg = text
-
     current_x = x_start
     current_y = y_start
-    
     if part_bold:
         words = part_bold.split()
         for i, word in enumerate(words):
@@ -99,7 +88,6 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
                 current_y += line_height
             draw.text((current_x, current_y), word, font=font_bold, fill=COLOR_HIGHLIGHT)
             current_x += word_w
-
     if part_reg:
         words = part_reg.split()
         if part_bold and current_x > x_start:
@@ -117,54 +105,36 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
                 draw.text((current_x, current_y), word, font=font_reg, fill=COLOR_NORMAL)
                 current_x += word_w
             if i < len(words) - 1: current_x += space_w
-
     return current_y + line_height
 
-# === VẼ OVERLAY 540P ===
 def create_list_overlay(header, content, output_img_path):
-    # Setup Canvas 540x960 (Nhẹ)
     W, H = 540, 960 
     img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    
     path_bold, path_reg = get_ready_font()
-    
-    # Font size cho 540p
-    FONT_SIZE_HEADER = 38
-    FONT_SIZE_BODY = 26
-    
+    FONT_SIZE_HEADER, FONT_SIZE_BODY = 38, 26
     try:
         if path_bold:
             font_header = ImageFont.truetype(path_bold, FONT_SIZE_HEADER)
             font_body_bold = ImageFont.truetype(path_bold, FONT_SIZE_BODY)
             font_body_reg = ImageFont.truetype(path_reg, FONT_SIZE_BODY)
-        else:
-            font_header = ImageFont.load_default()
-            font_body_bold = ImageFont.load_default()
-            font_body_reg = ImageFont.load_default()
+        else: raise Exception
     except:
-        font_header = ImageFont.load_default()
-        font_body_bold = ImageFont.load_default()
-        font_body_reg = ImageFont.load_default()
+        font_header = font_body_bold = font_body_reg = ImageFont.load_default()
 
     clean_header = header.replace("\\n", "\n").replace("\\N", "\n")
     clean_content = content.replace("\\n", "\n").replace("\\N", "\n")
-
     box_width = 480
     padding_x = 30 
     max_text_width = box_width - (padding_x * 2)
-
     header_lines = []
     for line in clean_header.split('\n'):
         header_lines.extend(textwrap.wrap(line.strip().upper(), width=22))
-
     line_height_header = int(FONT_SIZE_HEADER * 1.2)
     line_height_body = int(FONT_SIZE_BODY * 1.4)
     spacing_header_body = 25 
     padding_y = 30
-    
     h_header = len(header_lines) * line_height_header
-    
     temp_y = 0
     body_items = clean_content.split('\n')
     dummy_draw = ImageDraw.Draw(Image.new('RGBA', (1, 1)))
@@ -172,35 +142,26 @@ def create_list_overlay(header, content, output_img_path):
         if not item.strip(): continue
         temp_y = draw_highlighted_line(dummy_draw, 0, temp_y, item, font_body_bold, font_body_reg, max_text_width, line_height_body)
         temp_y += 8 
-    
     h_body = temp_y
     box_height = padding_y + h_header + spacing_header_body + h_body + padding_y
-    
     box_x = (W - box_width) // 2
     box_y = (H - box_height) // 2
-    
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], fill=(255, 255, 255, 245), outline=None)
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], outline=(200, 200, 200, 150), width=2)
-
     current_y = box_y + padding_y
     for line in header_lines:
         text_w = draw.textlength(line, font=font_header)
         text_x = box_x + (box_width - text_w) // 2 
         draw.text((text_x, current_y), line, font=font_header, fill=(204, 0, 0, 255))
         current_y += line_height_header
-
     current_y += spacing_header_body
     start_x = box_x + padding_x
     for item in body_items:
         if not item.strip(): continue
         current_y = draw_highlighted_line(draw, start_x, current_y, item, font_body_bold, font_body_reg, max_text_width, line_height_body)
         current_y += 8
-
     img.save(output_img_path)
 
-# ==========================================
-# CÁC API KHÁC
-# ==========================================
 @app.post("/merge")
 def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
     # GIỮ NGUYÊN CODE CŨ
@@ -239,9 +200,6 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
 def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
     return HTTPException(status_code=200, detail="OK")
 
-# ==========================================
-# API: SHORTS LIST (V26 - DIRECT OVERLAY)
-# ==========================================
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
     req_id = str(uuid.uuid4())
@@ -254,27 +212,25 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
     try:
         download_file_req(request.video_url, input_video)
         download_file_req(request.audio_url, input_audio)
-        
-        # 1. Tạo Overlay (Size 540x960)
         create_list_overlay(request.header_text, request.list_content, overlay_img)
 
-        # 2. Render KHÔNG RESIZE (Để tránh sập RAM)
-        # Giả định: Video đầu vào ĐÃ được resize về 540x960 (hoặc 720x1280) ở bên ngoài.
-        # Lệnh này chỉ đơn giản là Dán đè lên.
-        
+        # LỆNH FFMPEG V27: Ép size video nền về 540x960 TRƯỚC khi overlay
+        # Điều này giúp FFmpeg chỉ xử lý trên khung hình nhỏ, tiết kiệm RAM.
         cmd = [
             "ffmpeg",
             "-threads", "1",
             "-stream_loop", "-1",
-            "-i", input_video,      # Input đã nhẹ
+            "-i", input_video,      
             "-i", input_audio,
             "-i", overlay_img,
             "-filter_complex", 
-            f"[0:v][2:v]overlay=0:0[v]", # Bỏ scale, bỏ crop. Chỉ overlay thôi.
+            # Dòng này quan trọng: Scale & Crop video nền về 540x960 ngay lập tức
+            # Dù input là 4K thì nó cũng bị bóp nhỏ lại trước khi dán ảnh
+            f"[0:v]scale=540:960:force_original_aspect_ratio=increase,crop=540:960:(iw-ow)/2:(ih-oh)/2[bg];[bg][2:v]overlay=0:0[v]",
             "-map", "[v]", "-map", "1:a",
             "-c:v", "libx264", 
             "-preset", "ultrafast",
-            "-crf", "30",
+            "-crf", "28",
             "-max_muxing_queue_size", "1024",
             "-c:a", "aac",
             "-t", str(request.duration),
