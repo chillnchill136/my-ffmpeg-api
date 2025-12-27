@@ -3,7 +3,6 @@ import uuid
 import os
 import requests
 import shutil
-import textwrap
 import glob
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
@@ -47,52 +46,77 @@ def download_file(url, filename, file_type="File"):
         print(f"Đang tải {file_type} từ: {url}")
         response = requests.get(url, headers=headers, stream=True, timeout=30)
         if response.status_code != 200:
-            print(f"-> Thất bại: {response.status_code}")
             return False
         with open(filename, 'wb') as f:
             response.raw.decode_content = True
             shutil.copyfileobj(response.raw, f)
-        print("-> Thành công!")
         return True
     except Exception as e:
-        print(f"-> Lỗi: {e}")
+        print(f"Lỗi: {e}")
         return False
 
-# === CHIẾN LƯỢC TẢI FONT 3 LỚP ===
+# === TẢI FONT ===
 def get_valid_font_path():
     font_filename = "MyFont-Bold.ttf"
     if os.path.exists(font_filename) and os.path.getsize(font_filename) > 10000:
         return font_filename
 
-    # Ưu tiên Roboto hoặc Arial vì nó gọn (Condensed), hợp với style liệt kê
     font_urls = [
         "https://github.com/google/fonts/raw/main/apache/roboto/static/Roboto-Bold.ttf",
         "https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial-Bold.ttf",
     ]
-
-    print("Đang tìm tải Font...")
     for url in font_urls:
         if download_file(url, font_filename, "Font Candidate"):
             return font_filename
     
-    # Fallback
     system_fonts = glob.glob("/usr/share/fonts/**/*.ttf", recursive=True)
     if system_fonts: return system_fonts[0]
     return None
 
-# === HÀM VẼ ẢNH OVERLAY (V10 - STYLE CHUẨN) ===
+# === HÀM CẮT DÒNG THEO PIXEL (LOGIC MỚI) ===
+def wrap_text_by_pixel(text, font, max_width, draw):
+    """
+    Cắt dòng dựa trên độ rộng thực tế (pixel) thay vì số lượng ký tự.
+    """
+    lines = []
+    # Tách các đoạn văn bản có sẵn (do người dùng nhập \n)
+    paragraphs = text.split('\n')
+    
+    for paragraph in paragraphs:
+        words = paragraph.split() # Tách từng từ
+        if not words:
+            continue # Bỏ qua dòng trống
+            
+        current_line = words[0]
+        
+        for word in words[1:]:
+            # Thử ghép từ tiếp theo vào
+            test_line = current_line + " " + word
+            # Đo độ rộng thực tế
+            w = draw.textlength(test_line, font=font)
+            
+            if w <= max_width:
+                current_line = test_line # Vẫn đủ chỗ -> Ghép tiếp
+            else:
+                lines.append(current_line) # Hết chỗ -> Lưu dòng cũ
+                current_line = word # Bắt đầu dòng mới với từ hiện tại
+        
+        lines.append(current_line) # Lưu dòng cuối cùng của đoạn
+        
+    return lines
+
+# === HÀM VẼ ẢNH OVERLAY (V12 - FIX TRÀN VIỀN TUYỆT ĐỐI) ===
 def create_list_overlay(header, content, output_img_path):
     W, H = 1080, 1920
     img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
     font_path = get_valid_font_path()
-    if not font_path:
-        raise Exception("Lỗi: Không tìm thấy Font chữ!")
+    if not font_path: raise Exception("Lỗi Font")
 
-    # CẤU HÌNH SIZE (Đã tinh chỉnh nhỏ hơn để vừa màn hình)
-    FONT_SIZE_HEADER = 65  # Giảm từ 90 -> 65
-    FONT_SIZE_BODY = 45    # Giảm từ 60 -> 45
+    # 1. CẤU HÌNH FONT & SIZE
+    FONT_SIZE_HEADER = 65  
+    FONT_SIZE_BODY = 45    
     
     try:
         font_header = ImageFont.truetype(font_path, FONT_SIZE_HEADER)
@@ -101,69 +125,63 @@ def create_list_overlay(header, content, output_img_path):
         font_header = ImageFont.load_default()
         font_body = ImageFont.load_default()
 
-    # Cấu hình Box
-    box_width = 920 
-    padding_x = 50 # Lề trái phải trong box
-    padding_y = 50 # Lề trên dưới trong box
-    
-    # 1. Xử lý Header
-    # Tăng width wrap lên vì font nhỏ hơn (22 ký tự/dòng)
-    header_lines = textwrap.wrap(header.upper(), width=22) 
-    
-    # 2. Xử lý Body
-    raw_lines = content.split('\n')
-    body_lines = []
-    for line in raw_lines:
-        # Wrap body dài hơn (38 ký tự/dòng)
-        wrapped = textwrap.wrap(line, width=38)
-        body_lines.extend(wrapped)
+    # 2. XỬ LÝ TEXT INPUT (Chuyển \n string thành newline thật)
+    clean_header = header.replace("\\n", "\n").replace("\\N", "\n")
+    clean_content = content.replace("\\n", "\n").replace("\\N", "\n")
 
-    # 3. Tính chiều cao Box
-    line_height_header = int(FONT_SIZE_HEADER * 1.3) # Giãn dòng 1.3
-    line_height_body = int(FONT_SIZE_BODY * 1.4)     # Giãn dòng 1.4 cho dễ đọc
-    spacing_header_body = 40 
+    # 3. CẤU HÌNH KÍCH THƯỚC BOX & WRAP
+    box_width = 940 
+    padding_x = 60 # Lề trái phải
+    
+    # Tính toán độ rộng tối đa cho phép của chữ
+    # Max Width = Chiều rộng Box - (Lề trái + Lề phải)
+    max_text_width_header = box_width - (40 * 2) 
+    max_text_width_body = box_width - (padding_x + 30) # Body lùi vào 60px nên trừ hao thêm
+
+    # 4. THỰC HIỆN WRAP (PIXEL PERFECT)
+    header_lines = wrap_text_by_pixel(clean_header.upper(), font_header, max_text_width_header, draw)
+    body_lines = wrap_text_by_pixel(clean_content, font_body, max_text_width_body, draw)
+
+    # 5. TÍNH TOÁN CHIỀU CAO BOX
+    line_height_header = int(FONT_SIZE_HEADER * 1.2)
+    line_height_body = int(FONT_SIZE_BODY * 1.3)
+    spacing_header_body = 50 
+    padding_y = 60
     
     total_header_height = len(header_lines) * line_height_header
     total_body_height = len(body_lines) * line_height_body
     
     box_height = padding_y + total_header_height + spacing_header_body + total_body_height + padding_y
     
-    # Giới hạn chiều cao Box không quá 80% màn hình (tránh tràn)
-    max_height = int(H * 0.85)
-    if box_height > max_height:
-        print("Cảnh báo: Nội dung quá dài, có thể bị cắt bớt!")
-        # Ở đây có thể scale font nhỏ hơn nữa nếu muốn, nhưng tạm thời giữ nguyên
-    
-    # Tọa độ
+    # Tọa độ vẽ Box
     box_x = (W - box_width) // 2
     box_y = (H - box_height) // 2
     
-    # 4. Vẽ Box Trắng Mờ (Opacity 240/255 ~ 94%)
-    # Giả lập bo góc bằng cách vẽ rectangle thường (Pillow vẽ bo góc hơi phức tạp)
+    # 6. VẼ BOX TRẮNG MỜ
     draw.rectangle(
         [(box_x, box_y), (box_x + box_width, box_y + box_height)],
-        fill=(255, 255, 255, 240), 
+        fill=(255, 255, 255, 245), 
         outline=None
     )
-    # Viền box nhạt (tùy chọn)
+    # Viền nhẹ
     draw.rectangle(
         [(box_x, box_y), (box_x + box_width, box_y + box_height)],
-        outline=(200, 200, 200, 100),
-        width=2
+        outline=(200, 200, 200, 150),
+        width=3
     )
 
-    # 5. Vẽ Header (Màu Đỏ Đậm: #CC0000)
+    # 7. VẼ HEADER (ĐỎ ĐẬM, CĂN GIỮA)
     current_y = box_y + padding_y
     for line in header_lines:
         text_w = draw.textlength(line, font=font_header)
-        text_x = box_x + (box_width - text_w) // 2 # Căn giữa
+        text_x = box_x + (box_width - text_w) // 2 
         draw.text((text_x, current_y), line, font=font_header, fill=(204, 0, 0, 255))
         current_y += line_height_header
 
-    # 6. Vẽ Body (Màu Đen: #000000)
+    # 8. VẼ BODY (ĐEN, CĂN TRÁI, THỤT LỀ)
     current_y += spacing_header_body
+    
     for line in body_lines:
-        # Body căn trái, lùi vào so với mép box
         draw.text(
             (box_x + padding_x, current_y), 
             line, 
@@ -175,8 +193,9 @@ def create_list_overlay(header, content, output_img_path):
     img.save(output_img_path)
 
 # ==========================================
-# 1. API: SHORT VIDEO (PING-PONG)
+# CÁC API GIỮ NGUYÊN
 # ==========================================
+
 @app.post("/merge")
 def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
     req_id = str(uuid.uuid4())
@@ -237,9 +256,6 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
         cleanup_files(files_to_clean)
         raise HTTPException(status_code=400, detail=str(e))
 
-# ==========================================
-# 2. API: PODCAST (STATIC IMAGE)
-# ==========================================
 @app.post("/podcast")
 def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
     req_id = str(uuid.uuid4())
@@ -276,9 +292,6 @@ def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
         cleanup_files(files_to_clean)
         raise HTTPException(status_code=400, detail=str(e))
 
-# ==========================================
-# 3. API: SHORTS LIST (5S) - RAM OPTIMIZED + FIX STYLE
-# ==========================================
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
     req_id = str(uuid.uuid4())
