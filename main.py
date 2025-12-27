@@ -69,7 +69,6 @@ def create_list_overlay(header, content, output_img_path):
     font_path = ensure_font_exists()
     
     try:
-        # Font Header to hơn, Body nhỏ hơn
         font_header = ImageFont.truetype(font_path, 90)
         font_body = ImageFont.truetype(font_path, 60)
     except:
@@ -79,7 +78,7 @@ def create_list_overlay(header, content, output_img_path):
     lines = content.split('\n')
     wrapped_lines = []
     for line in lines:
-        if len(line) > 28: # Cắt dòng nếu quá dài
+        if len(line) > 28: 
             wrapped_lines.append(line[:28])
             wrapped_lines.append(line[28:])
         else:
@@ -144,10 +143,11 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
         final_input_video = input_video
         if request.ping_pong:
             try:
+                # Thêm -threads 1 để tiết kiệm RAM khi tạo ping-pong
                 subprocess.run([
-                    "ffmpeg", "-i", input_video,
+                    "ffmpeg", "-threads", "1", "-i", input_video,
                     "-filter_complex", "[0:v]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]",
-                    "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-y", pingpong_video
+                    "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-y", pingpong_video
                 ], check=True)
                 final_input_video = pingpong_video
             except: pass
@@ -175,7 +175,7 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
             last_stream = "[v2]"
 
         cmd = [
-            "ffmpeg", "-stream_loop", "-1", "-i", final_input_video, "-i", input_audio,
+            "ffmpeg", "-threads", "1", "-stream_loop", "-1", "-i", final_input_video, "-i", input_audio,
             "-filter_complex", ";".join(filters), "-map", last_stream, "-map", "1:a",
             "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", "-y", output_file
         ]
@@ -209,7 +209,8 @@ def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
                 f.write(request.subtitle_content)
             has_sub = True
 
-        cmd = ["ffmpeg", "-loop", "1", "-i", input_image, "-i", input_audio]
+        # Thêm -threads 1
+        cmd = ["ffmpeg", "-threads", "1", "-loop", "1", "-i", input_image, "-i", input_audio]
         if has_sub:
             font_name_sub = "Merriweather-Bold" if font_path else "Arial"
             style = f"FontName={font_name_sub},FontSize=18,PrimaryColour=&H00FFFFFF,BorderStyle=1,Outline=2,MarginV=50,Alignment=2"
@@ -226,7 +227,7 @@ def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail=str(e))
 
 # ==========================================
-# 3. API MỚI: RENDER SHORTS LIST (5S)
+# 3. API MỚI: RENDER SHORTS LIST (5S) - ĐÃ TỐI ƯU RAM
 # ==========================================
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
@@ -244,12 +245,23 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
         create_list_overlay(request.header_text, request.list_content, overlay_img)
 
         cmd = [
-            "ffmpeg", "-stream_loop", "-1", "-i", input_video, "-i", input_audio, "-i", overlay_img,
+            "ffmpeg",
+            "-threads", "1",             # QUAN TRỌNG: Giới hạn 1 luồng để không tràn RAM
+            "-stream_loop", "-1",
+            "-i", input_video,
+            "-i", input_audio,
+            "-i", overlay_img,
             "-filter_complex", 
+            # Giữ nguyên filter, chỉ thêm threads 1 ở đầu
             f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:(iw-ow)/2:(ih-oh)/2[bg];[bg][2:v]overlay=0:0[v]",
             "-map", "[v]", "-map", "1:a",
-            "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
-            "-t", str(request.duration), "-y", output_file
+            "-c:v", "libx264", 
+            "-preset", "ultrafast",      # Render nhanh nhất có thể
+            "-crf", "28",                # Giảm chất lượng một chút xíu để nhẹ gánh (23 -> 28)
+            "-c:a", "aac",
+            "-t", str(request.duration),
+            "-y",
+            output_file
         ]
         subprocess.run(cmd, check=True)
         background_tasks.add_task(cleanup_files, files_to_clean)
