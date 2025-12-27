@@ -19,60 +19,37 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = FastAPI()
 
-# === CẤU HÌNH FONT ===
-# Lưu vào /tmp để tránh lỗi quyền
-FONT_BOLD_PATH = "/tmp/Lora-Bold.ttf"
-FONT_REG_PATH = "/tmp/Lora-Regular.ttf"
+# === CẤU HÌNH FONT (Ưu tiên file bạn đã upload) ===
+# Tên file phải khớp chính xác 100% với file trên GitHub của bạn
+LOCAL_FONT_BOLD = "Lora-Bold.ttf"
+LOCAL_FONT_REG = "Lora-Regular.ttf"
 
-# Link gốc từ Google Fonts (Thường ổn định hơn)
-URL_BOLD = "https://github.com/google/fonts/raw/main/ofl/lora/static/Lora-Bold.ttf"
-URL_REG = "https://github.com/google/fonts/raw/main/ofl/lora/static/Lora-Regular.ttf"
-
-def download_font_force(url, save_path):
-    """Tải font với cơ chế thử lại mạnh mẽ"""
-    print(f"-> Đang tải font: {save_path}...")
+def system_download(url, filename):
     try:
-        # verify=False để bỏ qua lỗi SSL nếu có
-        r = requests.get(url, stream=True, verify=False, timeout=30)
-        if r.status_code == 200:
-            with open(save_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            
-            size = os.path.getsize(save_path)
-            print(f"   => Tải xong! Kích thước: {size} bytes")
-            if size < 10000: # Nếu file quá nhỏ (<10KB) là lỗi
-                print("   => CẢNH BÁO: File quá nhỏ, có thể bị lỗi.")
-                return False
-            return True
-        else:
-            print(f"   => Lỗi HTTP: {r.status_code}")
-    except Exception as e:
-        print(f"   => Lỗi Exception: {e}")
+        subprocess.run(["curl", "-L", "-k", "-o", filename, url], check=True, timeout=60)
+        if os.path.exists(filename) and os.path.getsize(filename) > 5000: return True
+    except: pass
     return False
 
-def get_system_font_fallback():
-    """Tìm font có sẵn trên Linux hỗ trợ Tiếng Việt"""
-    # Các font phổ biến trên Linux Docker
-    common_fonts = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"
-    ]
-    for font in common_fonts:
-        if os.path.exists(font):
-            print(f"-> Tìm thấy font hệ thống thay thế: {font}")
-            return font
-    return None
-
-# === KHỞI ĐỘNG: TẢI FONT NGAY ===
 @app.on_event("startup")
 async def startup_check():
-    print("--- STARTUP: DOWNLOAD FONTS ---")
-    download_font_force(URL_BOLD, FONT_BOLD_PATH)
-    download_font_force(URL_REG, FONT_REG_PATH)
+    print("--- KIỂM TRA FILE TRÊN SERVER ---")
+    files = os.listdir(".")
+    print(f"Danh sách file hiện có: {files}")
+    
+    if LOCAL_FONT_BOLD in files:
+        print(f"✅ Đã thấy font {LOCAL_FONT_BOLD} (Local)")
+    else:
+        print(f"❌ Không thấy {LOCAL_FONT_BOLD}. Đang thử tải cứu hộ...")
+        # Chỉ tải nếu thiếu
+        system_download("https://github.com/google/fonts/raw/main/ofl/lora/static/Lora-Bold.ttf", LOCAL_FONT_BOLD)
 
-# ... (Các Class Model giữ nguyên) ...
+    if LOCAL_FONT_REG in files:
+        print(f"✅ Đã thấy font {LOCAL_FONT_REG} (Local)")
+    else:
+        print(f"❌ Không thấy {LOCAL_FONT_REG}. Đang thử tải cứu hộ...")
+        system_download("https://github.com/google/fonts/raw/main/ofl/lora/static/Lora-Regular.ttf", LOCAL_FONT_REG)
+
 class MergeRequest(BaseModel):
     video_url: str = ""
     image_url: str = "" 
@@ -95,26 +72,35 @@ def cleanup_files(files):
             except: pass
     gc.collect() 
 
-def system_download(url, filename):
-    try:
-        # Dùng requests thay curl để an toàn hơn
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        with requests.get(url, headers=headers, stream=True, verify=False, timeout=60) as r:
-            if r.status_code != 200: return False
-            with open(filename, 'wb') as f:
-                shutil.copyfileobj(r.raw, f)
-        if os.path.exists(filename) and os.path.getsize(filename) > 1000: return True
-    except: pass
-    return False
-
 def download_file_req(url, filename):
     if not url: return False
     return system_download(url, filename)
 
-# ... (Hàm vẽ Text Overlay được nâng cấp) ...
+def get_best_font_path():
+    # 1. Ưu tiên file local ngay cạnh code
+    if os.path.exists(LOCAL_FONT_BOLD) and os.path.getsize(LOCAL_FONT_BOLD) > 10000:
+        return LOCAL_FONT_BOLD, LOCAL_FONT_REG
+    
+    # 2. Tìm trong thư mục static (nếu có)
+    if os.path.exists(f"static/{LOCAL_FONT_BOLD}"):
+        return f"static/{LOCAL_FONT_BOLD}", f"static/{LOCAL_FONT_REG}"
+
+    # 3. Fallback hệ thống (Ubuntu/Debian) hỗ trợ tiếng Việt
+    sys_fonts = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+    ]
+    for f in sys_fonts:
+        if os.path.exists(f):
+            print(f"-> Dùng font hệ thống thay thế: {f}")
+            return f, f.replace("Bold", "Regular") # Hack đơn giản
+            
+    return None, None
+
 def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max_width, line_height):
-    COLOR_HIGHLIGHT = (204, 0, 0, 255) 
-    COLOR_NORMAL = (0, 0, 0, 255)      
+    COLOR_HIGHLIGHT = (204, 0, 0, 255) # Đỏ
+    COLOR_NORMAL = (0, 0, 0, 255)      # Đen
+    
     if ":" in text:
         parts = text.split(":", 1)
         part_bold = parts[0] + ":"
@@ -122,8 +108,11 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
     else:
         part_bold = ""
         part_reg = text
+
     current_x = x_start
     current_y = y_start
+    
+    # Vẽ Bold
     if part_bold:
         words = part_bold.split()
         for i, word in enumerate(words):
@@ -134,6 +123,8 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
                 current_y += line_height
             draw.text((current_x, current_y), word, font=font_bold, fill=COLOR_HIGHLIGHT)
             current_x += word_w
+
+    # Vẽ Regular
     if part_reg:
         words = part_reg.split()
         if part_bold and current_x > x_start:
@@ -158,40 +149,27 @@ def create_list_overlay(header, content, output_img_path):
     img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
-    # 1. QUYẾT ĐỊNH FONT (QUAN TRỌNG NHẤT)
-    # Ưu tiên Lora tải về -> Sau đó đến Font hệ thống -> Cuối cùng mới là Default
-    final_font_bold = None
-    final_font_reg = None
+    # --- CẤU HÌNH SIZE CHUẨN (ĐÃ GIẢM) ---
+    FONT_SIZE_HEADER = 36  # Giảm từ 48
+    FONT_SIZE_BODY = 24    # Giảm từ 32
     
-    # Check Lora
-    if os.path.exists(FONT_BOLD_PATH) and os.path.getsize(FONT_BOLD_PATH) > 10000:
-        final_font_bold = FONT_BOLD_PATH
-        final_font_reg = FONT_REG_PATH
-        print("-> Dùng Font: Lora (Downloaded)")
-    else:
-        # Check System Font
-        sys_font = get_system_font_fallback()
-        if sys_font:
-            final_font_bold = sys_font
-            final_font_reg = sys_font
-            print(f"-> Dùng Font: System ({sys_font})")
-    
-    # Cấu hình Size to
-    FONT_SIZE_HEADER = 48  
-    FONT_SIZE_BODY = 32    
+    path_bold, path_reg = get_best_font_path()
     
     try:
-        if final_font_bold:
-            font_header = ImageFont.truetype(final_font_bold, FONT_SIZE_HEADER)
-            font_body_bold = ImageFont.truetype(final_font_bold, FONT_SIZE_BODY)
-            font_body_reg = ImageFont.truetype(final_font_reg, FONT_SIZE_BODY)
+        if path_bold:
+            font_header = ImageFont.truetype(path_bold, FONT_SIZE_HEADER)
+            font_body_bold = ImageFont.truetype(path_bold, FONT_SIZE_BODY)
+            # Nếu không tìm thấy file reg thì dùng bold thay thế tạm
+            reg_to_use = path_reg if (path_reg and os.path.exists(path_reg)) else path_bold
+            font_body_reg = ImageFont.truetype(reg_to_use, FONT_SIZE_BODY)
+            print(f"-> Load Font OK: {path_bold}")
         else:
-            print("-> CẢNH BÁO: Không tìm thấy font nào, dùng default (sẽ lỗi tiếng Việt)")
+            print("-> CRITICAL: Không có font, dùng Default")
             font_header = ImageFont.load_default()
             font_body_bold = ImageFont.load_default()
             font_body_reg = ImageFont.load_default()
     except Exception as e:
-        print(f"Lỗi load font: {e}")
+        print(f"-> Lỗi load font: {e}")
         font_header = ImageFont.load_default()
         font_body_bold = ImageFont.load_default()
         font_body_reg = ImageFont.load_default()
@@ -205,13 +183,14 @@ def create_list_overlay(header, content, output_img_path):
 
     import textwrap
     header_lines = []
+    # Tăng số ký tự wrap lên 22 vì font bé hơn -> chứa được nhiều hơn
     for line in clean_header.split('\n'):
-        header_lines.extend(textwrap.wrap(line.strip().upper(), width=18))
+        header_lines.extend(textwrap.wrap(line.strip().upper(), width=22))
 
     line_height_header = int(FONT_SIZE_HEADER * 1.2)
     line_height_body = int(FONT_SIZE_BODY * 1.4)
-    spacing_header_body = 30 
-    padding_y = 35
+    spacing_header_body = 25 
+    padding_y = 30
     
     h_header = len(header_lines) * line_height_header
     
@@ -221,7 +200,7 @@ def create_list_overlay(header, content, output_img_path):
     for item in body_items:
         if not item.strip(): continue
         temp_y = draw_highlighted_line(dummy_draw, 0, temp_y, item, font_body_bold, font_body_reg, max_text_width, line_height_body)
-        temp_y += 12 
+        temp_y += 10 
     
     h_body = temp_y
     box_height = padding_y + h_header + spacing_header_body + h_body + padding_y
@@ -229,9 +208,11 @@ def create_list_overlay(header, content, output_img_path):
     box_x = (W - box_width) // 2
     box_y = (H - box_height) // 2
     
+    # Vẽ Box
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], fill=(255, 255, 255, 245), outline=None)
-    draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], outline=(200, 200, 200, 150), width=3)
+    draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], outline=(200, 200, 200, 150), width=2)
 
+    # Vẽ Header
     current_y = box_y + padding_y
     for line in header_lines:
         text_w = draw.textlength(line, font=font_header)
@@ -239,18 +220,18 @@ def create_list_overlay(header, content, output_img_path):
         draw.text((text_x, current_y), line, font=font_header, fill=(204, 0, 0, 255))
         current_y += line_height_header
 
+    # Vẽ Body
     current_y += spacing_header_body
     start_x = box_x + padding_x
     for item in body_items:
         if not item.strip(): continue
         current_y = draw_highlighted_line(draw, start_x, current_y, item, font_body_bold, font_body_reg, max_text_width, line_height_body)
-        current_y += 12
+        current_y += 10
 
     img.save(output_img_path)
 
 @app.post("/merge")
 def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
-    # GIỮ NGUYÊN (Merge video cũ)
     req_id = str(uuid.uuid4())
     input_video = f"{req_id}_v.mp4"
     pingpong_video = f"{req_id}_pp.mp4"
@@ -261,12 +242,8 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
     try:
         download_file_req(request.video_url, input_video)
         download_file_req(request.audio_url, input_audio)
-        
-        # Merge API cũng cần font tốt
-        font_path = "Arial"
-        if os.path.exists(FONT_BOLD_PATH): font_path = FONT_BOLD_PATH
-        elif get_system_font_fallback(): font_path = get_system_font_fallback()
-
+        path_bold, _ = get_best_font_path()
+        font_path = path_bold if path_bold else "Arial"
         final_input_video = input_video
         if request.ping_pong:
             try: subprocess.run(["ffmpeg", "-threads", "1", "-i", input_video, "-filter_complex", "[0:v]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-y", pingpong_video], check=True)
@@ -299,18 +276,15 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
     files_to_clean = [input_video, input_audio, overlay_img, normalized_bg, output_file]
 
     try:
-        # Tải File (Có cơ chế Safe cho Airtable)
-        vid_ok = download_file_req(request.video_url, input_video)
-        aud_ok = download_file_req(request.audio_url, input_audio)
+        vid_ok = system_download(request.video_url, input_video)
+        aud_ok = system_download(request.audio_url, input_audio)
         
-        # Vẽ Overlay (Code V36 Font Fix)
         create_list_overlay(request.header_text, request.list_content, overlay_img)
 
-        # Xử lý Video Nền
+        # BƯỚC 1: RESIZE (Cơ chế an toàn V34)
         bg_ready = False
         if vid_ok:
             try:
-                # Resize nhẹ
                 subprocess.run([
                     "ffmpeg", "-threads", "1", "-y", 
                     "-i", input_video, 
@@ -325,13 +299,13 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
         
         if not bg_ready:
             subprocess.run([
-                "ffmpeg", "-f", "lavfi", "-i", "color=c=black:s=540x960:r=30", 
+                "ffmpeg", "-f", "lavfi", "-i", f"color=c=black:s=540x960:r=30", 
                 "-t", str(request.duration),
                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-y", 
                 normalized_bg
             ], check=True)
 
-        # Ghép
+        # BƯỚC 2: GHÉP
         subprocess.run([
             "ffmpeg", "-threads", "4", 
             "-stream_loop", "-1", 
