@@ -39,13 +39,15 @@ def cleanup_files(files):
 
 def download_file(url, filename, file_type="File"):
     if not url: return False
-    # Headers giả lập trình duyệt để tránh bị chặn
+    # Headers giả lập trình duyệt xịn
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     }
     try:
         print(f"Đang tải {file_type} từ: {url}")
-        response = requests.get(url, headers=headers, stream=True, timeout=30)
+        # Tăng timeout lên 60s
+        response = requests.get(url, headers=headers, stream=True, timeout=60)
         if response.status_code != 200:
             print(f"-> Thất bại (Status {response.status_code})")
             return False
@@ -53,9 +55,8 @@ def download_file(url, filename, file_type="File"):
             response.raw.decode_content = True
             shutil.copyfileobj(response.raw, f)
         
-        # Kiểm tra file rác (quá nhỏ < 10KB là lỗi)
-        if os.path.getsize(filename) < 10000:
-            print(f"-> File quá nhỏ, có thể tải lỗi: {os.path.getsize(filename)} bytes")
+        if os.path.getsize(filename) < 5000: # File font thường > 20KB
+            print(f"-> File quá nhỏ: {os.path.getsize(filename)} bytes")
             os.remove(filename)
             return False
             
@@ -65,40 +66,53 @@ def download_file(url, filename, file_type="File"):
         print(f"-> Lỗi Exception: {e}")
         return False
 
-# === TẢI FONT LORA (BẮT BUỘC) ===
-def get_lora_fonts():
+# === TẢI FONT AN TOÀN (CDN + FALLBACK) ===
+def get_fonts_safe():
+    """
+    Ưu tiên 1: Lora (CDN jsDelivr)
+    Ưu tiên 2: Arial (Fallback nếu Lora lỗi)
+    """
     font_bold = "Lora-Bold.ttf"
     font_reg = "Lora-Regular.ttf"
     
-    # Link Raw trực tiếp từ Google Fonts Repo (Static folder)
-    # Link này ổn định nhất cho file TTF
-    url_bold = "https://raw.githubusercontent.com/google/fonts/main/ofl/lora/static/Lora-Bold.ttf"
-    url_reg = "https://raw.githubusercontent.com/google/fonts/main/ofl/lora/static/Lora-Regular.ttf"
+    # URL qua CDN jsDelivr (Nhanh & Không chặn)
+    url_bold = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Bold.ttf"
+    url_reg = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Regular.ttf"
 
-    # Tải Bold
+    # URL dự phòng Arial (Nếu Lora chết hẳn)
+    url_arial = "https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial-Bold.ttf"
+    arial_path = "ArialBold.ttf"
+
+    # 1. Thử tải Lora
+    has_lora = True
     if not os.path.exists(font_bold):
-        success = download_file(url_bold, font_bold, "Font Lora Bold")
-        if not success:
-            raise HTTPException(status_code=500, detail="CRITICAL: Không thể tải Font Lora-Bold từ Google. Vui lòng kiểm tra kết nối mạng của Server Railway.")
-
-    # Tải Regular
+        if not download_file(url_bold, font_bold, "Lora Bold"): has_lora = False
+    
     if not os.path.exists(font_reg):
-        success = download_file(url_reg, font_reg, "Font Lora Regular")
-        if not success:
-            raise HTTPException(status_code=500, detail="CRITICAL: Không thể tải Font Lora-Regular.")
+        if not download_file(url_reg, font_reg, "Lora Regular"): has_lora = False
+    
+    # 2. Nếu có Lora -> Trả về Lora
+    if has_lora and os.path.exists(font_bold) and os.path.exists(font_reg):
+        return font_bold, font_reg
+    
+    print("-> Không tải được Lora. Chuyển sang dùng Arial (Fallback).")
+    
+    # 3. Tải Arial để cứu vãn
+    if not os.path.exists(arial_path):
+        download_file(url_arial, arial_path, "Arial Fallback")
         
-    return font_bold, font_reg
+    if os.path.exists(arial_path):
+        # Trả về Arial cho cả Bold và Reg
+        return arial_path, arial_path
+    
+    # 4. Cùng đường -> Trả về None (dùng font mặc định xấu xí nhưng không crash)
+    return None, None
 
-# === HÀM VẼ DÒNG CÓ HIGHLIGHT (V14) ===
+# === HÀM VẼ DÒNG CÓ HIGHLIGHT ===
 def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max_width, line_height):
-    """
-    Vẽ text với logic: Trước dấu hai chấm (:) là BOLD + ĐỎ. Sau là REGULAR + ĐEN.
-    Tự động wrap dòng pixel-perfect.
-    """
-    COLOR_HIGHLIGHT = (204, 0, 0, 255) # Đỏ đậm (#CC0000)
+    COLOR_HIGHLIGHT = (204, 0, 0, 255) # Đỏ đậm
     COLOR_NORMAL = (0, 0, 0, 255)      # Đen
 
-    # Tách phần Highlight
     if ":" in text:
         parts = text.split(":", 1)
         part_bold = parts[0] + ":"
@@ -110,28 +124,23 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
     current_x = x_start
     current_y = y_start
     
-    # --- VẼ PHẦN BOLD ---
+    # VẼ BOLD
     if part_bold:
         words = part_bold.split()
         for i, word in enumerate(words):
-            # Thêm dấu cách sau từ (trừ từ cuối cùng của phần bold nếu nối tiếp phần reg)
             suffix = " " if i < len(words) else "" 
-            # Đo độ rộng từ + dấu cách
             word_w = draw.textlength(word + suffix, font=font_bold)
             
-            # Check tràn viền
             if current_x + word_w > x_start + max_width:
                 current_x = x_start
                 current_y += line_height
             
             draw.text((current_x, current_y), word, font=font_bold, fill=COLOR_HIGHLIGHT)
-            # Cộng vị trí (vẽ luôn dấu cách bằng khoảng trống)
             current_x += word_w
 
-    # --- VẼ PHẦN REGULAR ---
+    # VẼ REGULAR
     if part_reg:
         words = part_reg.split()
-        # Nếu phần trước đó đã vẽ, ta cần thêm 1 dấu cách nối tiếp giữa Bold và Regular
         if part_bold and current_x > x_start:
              space_w = draw.textlength(" ", font=font_reg)
              current_x += space_w
@@ -140,7 +149,6 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
             word_w = draw.textlength(word, font=font_reg)
             space_w = draw.textlength(" ", font=font_reg)
             
-            # Check tràn
             if current_x + word_w > x_start + max_width:
                 current_x = x_start
                 current_y += line_height
@@ -150,58 +158,60 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
                 draw.text((current_x, current_y), word, font=font_reg, fill=COLOR_NORMAL)
                 current_x += word_w
             
-            # Cộng thêm dấu cách cho từ tiếp theo
             if i < len(words) - 1:
                 current_x += space_w
 
     return current_y + line_height
 
-# === HÀM VẼ ẢNH OVERLAY (V14 - LORA CHUẨN) ===
+# === HÀM VẼ ẢNH OVERLAY (V15) ===
 def create_list_overlay(header, content, output_img_path):
     W, H = 1080, 1920
     img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
-    # Lấy Font chuẩn
-    path_bold, path_reg = get_lora_fonts()
-
-    # CẤU HÌNH SIZE (Giữ như cũ vì đang đẹp)
+    # Lấy Font an toàn
+    path_bold, path_reg = get_fonts_safe()
+    
+    # Cấu hình size
     FONT_SIZE_HEADER = 65  
     FONT_SIZE_BODY = 45    
     
-    font_header = ImageFont.truetype(path_bold, FONT_SIZE_HEADER)
-    font_body_bold = ImageFont.truetype(path_bold, FONT_SIZE_BODY)
-    font_body_reg = ImageFont.truetype(path_reg, FONT_SIZE_BODY)
+    # Load Font
+    try:
+        if path_bold:
+            font_header = ImageFont.truetype(path_bold, FONT_SIZE_HEADER)
+            font_body_bold = ImageFont.truetype(path_bold, FONT_SIZE_BODY)
+            font_body_reg = ImageFont.truetype(path_reg, FONT_SIZE_BODY)
+        else:
+            raise Exception("No font found")
+    except:
+        print("-> Cảnh báo: Dùng font mặc định hệ thống (xấu)")
+        font_header = ImageFont.load_default()
+        font_body_bold = ImageFont.load_default()
+        font_body_reg = ImageFont.load_default()
 
-    # XỬ LÝ TEXT INPUT
     clean_header = header.replace("\\n", "\n").replace("\\N", "\n")
     clean_content = content.replace("\\n", "\n").replace("\\N", "\n")
 
-    # CẤU HÌNH BOX
     box_width = 940 
     padding_x = 60 
     max_text_width = box_width - (padding_x * 2)
 
-    # TÍNH TOÁN HEADER (Wrap)
     import textwrap
     header_lines = []
     for line in clean_header.split('\n'):
-        # Wrap header chặt (20 chars)
         header_lines.extend(textwrap.wrap(line.strip().upper(), width=20))
 
-    # TÍNH TOÁN CHIỀU CAO (VẼ NHÁP)
     line_height_header = int(FONT_SIZE_HEADER * 1.2)
-    line_height_body = int(FONT_SIZE_BODY * 1.4) # Giãn dòng body thoáng hơn chút
+    line_height_body = int(FONT_SIZE_BODY * 1.4)
     spacing_header_body = 50 
     padding_y = 60
     
     h_header = len(header_lines) * line_height_header
     
-    # Tính height body bằng cách chạy thử logic vẽ
+    # Tính chiều cao body
     temp_y = 0
     body_items = clean_content.split('\n')
-    
-    # Tạo dummy image để đo kích thước chính xác
     dummy_draw = ImageDraw.Draw(Image.new('RGBA', (1, 1)))
     
     for item in body_items:
@@ -210,7 +220,7 @@ def create_list_overlay(header, content, output_img_path):
             dummy_draw, 0, temp_y, item, 
             font_body_bold, font_body_reg, max_text_width, line_height_body
         )
-        temp_y += 15 # Paragraph spacing
+        temp_y += 15 
     
     h_body = temp_y
     box_height = padding_y + h_header + spacing_header_body + h_body + padding_y
@@ -218,11 +228,9 @@ def create_list_overlay(header, content, output_img_path):
     box_x = (W - box_width) // 2
     box_y = (H - box_height) // 2
     
-    # VẼ BOX TRẮNG
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], fill=(255, 255, 255, 245), outline=None)
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], outline=(200, 200, 200, 150), width=3)
 
-    # VẼ HEADER (Đỏ đậm)
     current_y = box_y + padding_y
     for line in header_lines:
         text_w = draw.textlength(line, font=font_header)
@@ -230,7 +238,6 @@ def create_list_overlay(header, content, output_img_path):
         draw.text((text_x, current_y), line, font=font_header, fill=(204, 0, 0, 255))
         current_y += line_height_header
 
-    # VẼ BODY (Thật)
     current_y += spacing_header_body
     start_x = box_x + padding_x
     
@@ -240,12 +247,12 @@ def create_list_overlay(header, content, output_img_path):
             draw, start_x, current_y, item, 
             font_body_bold, font_body_reg, max_text_width, line_height_body
         )
-        current_y += 15 # Paragraph spacing
+        current_y += 15
 
     img.save(output_img_path)
 
 # ==========================================
-# CÁC API KHÁC GIỮ NGUYÊN
+# CÁC API KHÁC
 # ==========================================
 @app.post("/merge")
 def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
@@ -261,10 +268,8 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
         download_file(request.video_url, input_video, "Video")
         download_file(request.audio_url, input_audio, "Audio")
         
-        # Merge vẫn dùng Arial cho an toàn, hoặc có thể đổi sang Lora nếu muốn
-        font_path = "ArialBold.ttf" 
-        if not os.path.exists(font_path):
-             download_file("https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial-Bold.ttf", font_path, "Font")
+        path_bold, _ = get_fonts_safe()
+        font_path = path_bold if path_bold else "ArialBold.ttf"
 
         final_input_video = input_video
         if request.ping_pong:
@@ -332,11 +337,8 @@ def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
 
         cmd = ["ffmpeg", "-threads", "1", "-loop", "1", "-i", input_image, "-i", input_audio]
         if has_sub:
-            font_path = "ArialBold.ttf"
-            if not os.path.exists(font_path):
-                 download_file("https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial-Bold.ttf", font_path, "Font")
-            
-            font_name_sub = font_path if os.path.exists(font_path) else "Arial"
+            path_bold, _ = get_fonts_safe()
+            font_name_sub = path_bold if path_bold else "Arial"
             style = f"FontName={font_name_sub},FontSize=18,PrimaryColour=&H00FFFFFF,BorderStyle=1,Outline=2,MarginV=50,Alignment=2"
             cmd.extend(["-vf", f"subtitles={subtitle_file}:fontsdir=.:force_style='{style}'", "-tune", "stillimage", "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p"])
         else:
