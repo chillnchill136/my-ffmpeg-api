@@ -17,13 +17,13 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = FastAPI()
 
-# === CẤU HÌNH FONT (GIỮ NGUYÊN) ===
+# === CẤU HÌNH FONT & CDN ===
 FONT_BOLD = "Lora-Bold.ttf"
 FONT_REG = "Lora-Regular.ttf"
 CDN_BOLD = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Bold.ttf"
 CDN_REG = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Regular.ttf"
 
-# === HÀM TẢI (SYSTEM CURL) ===
+# === HÀM TẢI HỆ THỐNG ===
 def system_download(url, filename):
     try:
         print(f"-> Đang tải: {filename}...")
@@ -34,10 +34,9 @@ def system_download(url, filename):
         print(f"Lỗi tải: {e}")
     return False
 
-# === STARTUP CHECK ===
+# === STARTUP CHECK (Tải Font Tự Động) ===
 @app.on_event("startup")
 async def startup_check():
-    # Tự động tải bù font nếu thiếu
     if not os.path.exists(FONT_BOLD): system_download(CDN_BOLD, FONT_BOLD)
     if not os.path.exists(FONT_REG): system_download(CDN_REG, FONT_REG)
 
@@ -63,7 +62,7 @@ def cleanup_files(files):
         if os.path.exists(f):
             try: os.remove(f)
             except: pass
-    gc.collect() # Dọn dẹp RAM Python
+    gc.collect() 
 
 def download_file_req(url, filename):
     if not url: return False
@@ -202,7 +201,7 @@ def create_list_overlay(header, content, output_img_path):
 # ==========================================
 @app.post("/merge")
 def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
-    # GIỮ NGUYÊN CODE MERGE CŨ
+    # GIỮ NGUYÊN CODE MERGE CŨ CHO VIDEO NGẮN
     req_id = str(uuid.uuid4())
     input_video = f"{req_id}_v.mp4"
     pingpong_video = f"{req_id}_pp.mp4"
@@ -226,7 +225,6 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
             with open(subtitle_file, "w", encoding="utf-8") as f: f.write(request.subtitle_content)
             has_sub = True
         
-        # Simple rendering for merge to save space in this file
         cmd = ["ffmpeg", "-threads", "1", "-stream_loop", "-1", "-i", final_input_video, "-i", input_audio, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", "-y", output_file]
         subprocess.run(cmd, check=True)
         background_tasks.add_task(cleanup_files, files_to_clean)
@@ -239,7 +237,7 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
 def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
     return HTTPException(status_code=200, detail="OK")
 
-# === SHORTS LIST (V23 - CHIA ĐỂ TRỊ) ===
+# === SHORTS LIST (V24 - 2 BƯỚC AN TOÀN) ===
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
     req_id = str(uuid.uuid4())
@@ -247,56 +245,61 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
     input_audio = f"{req_id}_a.mp3"
     overlay_img = f"{req_id}_over.png"
     
-    # File tạm sau khi resize
-    temp_resized_bg = f"{req_id}_resized.mp4"
+    # File tạm siêu nhẹ
+    temp_processed_bg = f"{req_id}_small.mp4"
     output_file = f"{req_id}_short.mp4"
     
-    files_to_clean = [input_video, input_audio, overlay_img, temp_resized_bg, output_file]
+    files_to_clean = [input_video, input_audio, overlay_img, temp_processed_bg, output_file]
 
     try:
         download_file_req(request.video_url, input_video)
         download_file_req(request.audio_url, input_audio)
         
-        # 1. Tạo ảnh Overlay
+        # 1. Tạo ảnh Overlay (Logic Font V21)
         create_list_overlay(request.header_text, request.list_content, overlay_img)
 
-        # 2. BƯỚC 1: RESIZE VIDEO GỐC VỀ 540P (Lưu vào temp)
-        # Bước này chỉ resize, không làm gì khác -> Rất nhẹ RAM
-        cmd_resize = [
-            "ffmpeg", "-threads", "1", "-y",
-            "-i", input_video,
-            "-vf", "scale=540:960:force_original_aspect_ratio=increase,crop=540:960",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
-            "-an", # Bỏ audio gốc đi cho nhẹ
-            temp_resized_bg
-        ]
-        print("-> Đang resize video nền...")
-        subprocess.run(cmd_resize, check=True)
-
-        # 3. BƯỚC 2: GHÉP (MERGE)
-        # Lúc này video nền đã nhỏ, ghép rất nhanh và không tốn RAM
-        cmd_merge = [
+        # 2. BƯỚC 1: HẠ CẤP VIDEO GỐC (Tránh tràn RAM)
+        # - stream_loop -1: Lặp video nếu ngắn
+        # - t duration: Cắt đúng thời lượng
+        # - scale=-2:960: Ép chiều cao về 960, chiều rộng tự tính (giữ tỷ lệ)
+        # - sws_flags bilinear: Thuật toán resize nhanh và nhẹ nhất
+        print("-> BƯỚC 1: Hạ cấp video gốc...")
+        cmd_step1 = [
             "ffmpeg", "-threads", "1", "-y",
             "-stream_loop", "-1",
-            "-i", temp_resized_bg, # Input 1: Video 540p
-            "-i", input_audio,     # Input 2: Audio
-            "-i", overlay_img,     # Input 3: Ảnh
+            "-i", input_video,
+            "-t", str(request.duration),
+            "-vf", "scale=-2:960", 
+            "-sws_flags", "bilinear", 
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "32",
+            "-an", 
+            temp_processed_bg
+        ]
+        subprocess.run(cmd_step1, check=True)
+
+        # 3. BƯỚC 2: CẮT CÚP & GHÉP (Siêu nhẹ)
+        # Input lúc này đã là video nhỏ (cao 960px), nên crop và overlay rất mượt
+        print("-> BƯỚC 2: Ghép final...")
+        cmd_step2 = [
+            "ffmpeg", "-threads", "1", "-y",
+            "-i", temp_processed_bg, 
+            "-i", input_audio,     
+            "-i", overlay_img,    
             "-filter_complex", 
-            f"[0:v][2:v]overlay=0:0[v]", # Chỉ việc dán đè lên, không cần scale nữa
+            f"[0:v]crop=540:960:(iw-ow)/2:(ih-oh)/2[bg];[bg][2:v]overlay=0:0[v]", 
             "-map", "[v]", "-map", "1:a",
             "-c:v", "libx264", 
             "-preset", "ultrafast",
             "-crf", "28",
             "-c:a", "aac",
-            "-t", str(request.duration),
             output_file
         ]
-        print("-> Đang ghép final...")
-        subprocess.run(cmd_merge, check=True)
+        subprocess.run(cmd_step2, check=True)
 
         background_tasks.add_task(cleanup_files, files_to_clean)
         return FileResponse(output_file, media_type='video/mp4', filename="list_short.mp4")
     except Exception as e:
         cleanup_files(files_to_clean)
-        # In lỗi chi tiết ra để debug
+        # In lỗi chi tiết
+        print(f"LỖI RENDER: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Lỗi xử lý: {str(e)}")
