@@ -1,21 +1,67 @@
 import subprocess
 import uuid
 import os
-import requests
-import shutil
 import glob
-import urllib3
-import textwrap
+import shutil
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
 from PIL import Image, ImageDraw, ImageFont
-
-# Tắt cảnh báo SSL
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import textwrap
 
 app = FastAPI()
+
+# === CẤU HÌNH FONT ===
+FONT_BOLD = "Lora-Bold.ttf"
+FONT_REG = "Lora-Regular.ttf"
+# Link CDN siêu nhanh
+URL_BOLD = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Bold.ttf"
+URL_REG = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Regular.ttf"
+
+# === HÀM TẢI HỆ THỐNG (MẠNH HƠN PYTHON REQUESTS) ===
+def system_download(url, filename):
+    try:
+        print(f"-> Đang dùng CURL tải: {filename}...")
+        # curl -L (follow redirect) -k (bỏ qua SSL) -o (output)
+        subprocess.run(["curl", "-L", "-k", "-o", filename, url], check=True, timeout=60)
+        
+        if os.path.exists(filename) and os.path.getsize(filename) > 10000:
+            print(f"-> Tải thành công: {filename}")
+            return True
+        else:
+            print(f"-> File tải về bị lỗi/quá nhỏ: {filename}")
+            return False
+    except Exception as e:
+        print(f"-> CURL thất bại: {e}")
+        return False
+
+# === SỰ KIỆN KHỞI ĐỘNG SERVER (STARTUP) ===
+@app.on_event("startup")
+async def startup_event():
+    print("=== SERVER ĐANG KHỞI ĐỘNG: KIỂM TRA FONT ===")
+    
+    # 1. Quét file hiện có
+    all_files = glob.glob("**/*.ttf", recursive=True)
+    print(f"Danh sách .ttf hiện có trên ổ cứng: {all_files}")
+
+    # 2. Nếu chưa có Lora, ép tải bằng CURL
+    if not os.path.exists(FONT_BOLD):
+        # Kiểm tra xem có nằm trong thư mục static không
+        if os.path.exists(f"static/{FONT_BOLD}"):
+            print("-> Tìm thấy trong static/, copy ra ngoài...")
+            shutil.copy(f"static/{FONT_BOLD}", FONT_BOLD)
+        else:
+            system_download(URL_BOLD, FONT_BOLD)
+
+    if not os.path.exists(FONT_REG):
+        if os.path.exists(f"static/{FONT_REG}"):
+            print("-> Tìm thấy trong static/, copy ra ngoài...")
+            shutil.copy(f"static/{FONT_REG}", FONT_REG)
+        else:
+            system_download(URL_REG, FONT_REG)
+            
+    print("=== KIỂM TRA HOÀN TẤT ===")
 
 # === MODEL DỮ LIỆU ===
 class MergeRequest(BaseModel):
@@ -33,7 +79,7 @@ class ShortsRequest(BaseModel):
     list_content: str = ""        
     duration: int = 5             
 
-# === HÀM BỔ TRỢ ===
+# === HÀM BỔ TRỢ CHUNG ===
 def cleanup_files(files):
     for f in files:
         if os.path.exists(f):
@@ -42,57 +88,25 @@ def cleanup_files(files):
 
 def download_file(url, filename):
     if not url: return False
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    try:
-        r = requests.get(url, headers=headers, stream=True, timeout=60, verify=False)
-        if r.status_code != 200: return False
-        with open(filename, 'wb') as f:
-            shutil.copyfileobj(r.raw, f)
-        return True
-    except: return False
+    # Dùng luôn system download cho file người dùng gửi để an toàn
+    return system_download(url, filename)
 
-# === LOGIC TÌM FONT THÔNG MINH (FONT HUNTER) ===
-def find_best_font():
-    """
-    Tự động quét thư mục để tìm file font tốt nhất.
-    """
-    print("--- BẮT ĐẦU TÌM FONT ---")
+# === LẤY FONT CHUẨN ===
+def get_ready_font():
+    # Ưu tiên Lora
+    if os.path.exists(FONT_BOLD): return FONT_BOLD, FONT_REG if os.path.exists(FONT_REG) else FONT_BOLD
     
-    # 1. Liệt kê tất cả file .ttf hiện có để debug
-    all_ttf = glob.glob("**/*.ttf", recursive=True)
-    print(f"Các file TTF tìm thấy trên server: {all_ttf}")
-
-    # 2. Ưu tiên tìm Lora Bold (bất kể chữ hoa thường)
-    # Tìm file có chứa 'Lora' và 'Bold'
-    candidates_bold = [f for f in all_ttf if 'lora' in f.lower() and 'bold' in f.lower()]
-    candidates_reg = [f for f in all_ttf if 'lora' in f.lower() and 'regular' in f.lower()]
-
-    path_bold = candidates_bold[0] if candidates_bold else None
-    path_reg = candidates_reg[0] if candidates_reg else None
-
-    # 3. Nếu không thấy Lora, tìm Arial
-    if not path_bold:
-        candidates_arial = [f for f in all_ttf if 'arial' in f.lower()]
-        if candidates_arial:
-            print("-> Không thấy Lora, dùng tạm Arial")
-            path_bold = candidates_arial[0]
-            path_reg = candidates_arial[0]
-
-    # 4. Trả kết quả
-    if path_bold:
-        if not path_reg: path_reg = path_bold # Dùng Bold cho cả Reg nếu thiếu
-        print(f"-> CHỐT DÙNG FONT: {path_bold} & {path_reg}")
-        return path_bold, path_reg
-    
-    # 5. Cùng đường: Tự tải Arial về
-    print("-> Không tìm thấy font nào cả! Đang tải Arial cứu hộ...")
-    backup_font = "ArialRescue.ttf"
-    if download_file("https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial-Bold.ttf", backup_font):
-        return backup_font, backup_font
+    # Tìm bất kỳ file ttf nào
+    ttf_files = glob.glob("**/*.ttf", recursive=True)
+    if ttf_files:
+        print(f"-> Cảnh báo: Dùng font thay thế {ttf_files[0]}")
+        return ttf_files[0], ttf_files[0]
         
+    # Tuyệt vọng: Trả về None để dùng Default Font
+    print("-> TUYỆT VỌNG: Không có font nào!")
     return None, None
 
-# === LOGIC VẼ TEXT (GIỮ NGUYÊN) ===
+# === LOGIC VẼ (GIỮ NGUYÊN) ===
 def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max_width, line_height):
     COLOR_HIGHLIGHT = (204, 0, 0, 255) 
     COLOR_NORMAL = (0, 0, 0, 255)      
@@ -139,27 +153,29 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
 
     return current_y + line_height
 
-# === VẼ OVERLAY (V18) ===
+# === VẼ OVERLAY ===
 def create_list_overlay(header, content, output_img_path):
     W, H = 1080, 1920
     img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
-    # --- TỰ ĐỘNG TÌM FONT ---
-    path_bold, path_reg = find_best_font()
+    path_bold, path_reg = get_ready_font()
     
-    if not path_bold:
-        # Nếu vào đây là lỗi nghiêm trọng -> List file ra log để user biết
-        all_files = glob.glob("**/*", recursive=True)
-        print("DANH SÁCH FILE TRÊN SERVER:", all_files)
-        raise Exception("LỖI: Server không có file font nào (.ttf). Vui lòng check Log Railway.")
-
+    # SIZE 
     FONT_SIZE_HEADER = 65  
     FONT_SIZE_BODY = 45    
     
-    font_header = ImageFont.truetype(path_bold, FONT_SIZE_HEADER)
-    font_body_bold = ImageFont.truetype(path_bold, FONT_SIZE_BODY)
-    font_body_reg = ImageFont.truetype(path_reg, FONT_SIZE_BODY)
+    try:
+        if path_bold:
+            font_header = ImageFont.truetype(path_bold, FONT_SIZE_HEADER)
+            font_body_bold = ImageFont.truetype(path_bold, FONT_SIZE_BODY)
+            font_body_reg = ImageFont.truetype(path_reg, FONT_SIZE_BODY)
+        else:
+            raise Exception("No font")
+    except:
+        font_header = ImageFont.load_default()
+        font_body_bold = ImageFont.load_default()
+        font_body_reg = ImageFont.load_default()
 
     clean_header = header.replace("\\n", "\n").replace("\\N", "\n")
     clean_content = content.replace("\\n", "\n").replace("\\N", "\n")
@@ -213,7 +229,7 @@ def create_list_overlay(header, content, output_img_path):
     img.save(output_img_path)
 
 # ==========================================
-# CÁC API KHÁC (GIỮ NGUYÊN)
+# CÁC API KHÁC
 # ==========================================
 @app.post("/merge")
 def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
@@ -225,9 +241,9 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
     subtitle_file = f"{req_id}.srt"
     files_to_clean = [input_video, pingpong_video, input_audio, output_file, subtitle_file]
     try:
-        download_file(request.video_url, input_video)
-        download_file(request.audio_url, input_audio)
-        path_bold, _ = find_best_font() # Dùng font hunter
+        system_download(request.video_url, input_video)
+        system_download(request.audio_url, input_audio)
+        path_bold, _ = get_ready_font() 
         font_path = path_bold if path_bold else "Arial"
 
         final_input_video = input_video
@@ -274,15 +290,15 @@ def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
     subtitle_file = f"{req_id}.srt"
     files_to_clean = [input_image, input_audio, output_file, subtitle_file]
     try:
-        download_file(request.image_url, input_image)
-        download_file(request.audio_url, input_audio)
+        system_download(request.image_url, input_image)
+        system_download(request.audio_url, input_audio)
         has_sub = False
         if request.subtitle_content and len(request.subtitle_content.strip()) > 0:
             with open(subtitle_file, "w", encoding="utf-8") as f: f.write(request.subtitle_content)
             has_sub = True
         cmd = ["ffmpeg", "-threads", "1", "-loop", "1", "-i", input_image, "-i", input_audio]
         if has_sub:
-            path_bold, _ = find_best_font()
+            path_bold, _ = get_ready_font()
             font_name_sub = path_bold if path_bold else "Arial"
             style = f"FontName={font_name_sub},FontSize=18,PrimaryColour=&H00FFFFFF,BorderStyle=1,Outline=2,MarginV=50,Alignment=2"
             cmd.extend(["-vf", f"subtitles={subtitle_file}:fontsdir=.:force_style='{style}'", "-tune", "stillimage", "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p"])
@@ -305,8 +321,8 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
     output_file = f"{req_id}_short.mp4"
     files_to_clean = [input_video, input_audio, overlay_img, output_file]
     try:
-        download_file(request.video_url, input_video)
-        download_file(request.audio_url, input_audio)
+        system_download(request.video_url, input_video)
+        system_download(request.audio_url, input_audio)
         create_list_overlay(request.header_text, request.list_content, overlay_img)
         cmd = ["ffmpeg", "-threads", "1", "-stream_loop", "-1", "-i", input_video, "-i", input_audio, "-i", overlay_img, "-filter_complex", f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:(iw-ow)/2:(ih-oh)/2[bg];[bg][2:v]overlay=0:0[v]", "-map", "[v]", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-c:a", "aac", "-t", str(request.duration), "-y", output_file]
         subprocess.run(cmd, check=True)
