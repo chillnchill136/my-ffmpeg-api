@@ -61,16 +61,13 @@ def download_file(url, filename, file_type="File"):
 # === CHIẾN LƯỢC TẢI FONT 3 LỚP ===
 def get_valid_font_path():
     font_filename = "MyFont-Bold.ttf"
-    
-    # 1. Kiểm tra nếu đã có file font ngon thì dùng luôn
     if os.path.exists(font_filename) and os.path.getsize(font_filename) > 10000:
         return font_filename
 
-    # 2. Danh sách link dự phòng (Roboto, Arial, Merriweather)
+    # Ưu tiên Roboto hoặc Arial vì nó gọn (Condensed), hợp với style liệt kê
     font_urls = [
         "https://github.com/google/fonts/raw/main/apache/roboto/static/Roboto-Bold.ttf",
         "https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial-Bold.ttf",
-        "https://github.com/google/fonts/raw/main/ofl/merriweather/Merriweather-Bold.ttf"
     ]
 
     print("Đang tìm tải Font...")
@@ -78,84 +75,97 @@ def get_valid_font_path():
         if download_file(url, font_filename, "Font Candidate"):
             return font_filename
     
-    # 3. Nếu tải thất bại, tìm font có sẵn trong Linux (DejaVuSans thường có sẵn)
-    print("Tải font thất bại. Tìm font hệ thống...")
+    # Fallback
     system_fonts = glob.glob("/usr/share/fonts/**/*.ttf", recursive=True)
-    if system_fonts:
-        print(f"Tìm thấy font hệ thống: {system_fonts[0]}")
-        return system_fonts[0]
-        
+    if system_fonts: return system_fonts[0]
     return None
 
-# === HÀM VẼ ẢNH OVERLAY (V9 - FINAL FIX) ===
+# === HÀM VẼ ẢNH OVERLAY (V10 - STYLE CHUẨN) ===
 def create_list_overlay(header, content, output_img_path):
     W, H = 1080, 1920
     img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
     font_path = get_valid_font_path()
-    
     if not font_path:
-        raise Exception("CRITICAL ERROR: Không tìm thấy bất kỳ Font chữ nào trên server!")
+        raise Exception("Lỗi: Không tìm thấy Font chữ!")
 
-    # Cấu hình Font
+    # CẤU HÌNH SIZE (Đã tinh chỉnh nhỏ hơn để vừa màn hình)
+    FONT_SIZE_HEADER = 65  # Giảm từ 90 -> 65
+    FONT_SIZE_BODY = 45    # Giảm từ 60 -> 45
+    
     try:
-        font_header = ImageFont.truetype(font_path, 90) # Header to 90px
-        font_body = ImageFont.truetype(font_path, 60)   # Body to 60px
-    except Exception as e:
-        print(f"Lỗi load font: {e}")
-        # Font dự phòng cuối cùng (dù xấu nhưng to) - Thường ít khi rơi vào đây
-        font_header = ImageFont.load_default() 
+        font_header = ImageFont.truetype(font_path, FONT_SIZE_HEADER)
+        font_body = ImageFont.truetype(font_path, FONT_SIZE_BODY)
+    except:
+        font_header = ImageFont.load_default()
         font_body = ImageFont.load_default()
 
     # Cấu hình Box
-    box_width = 980 # Rộng hơn chút
-    padding = 60
+    box_width = 920 
+    padding_x = 50 # Lề trái phải trong box
+    padding_y = 50 # Lề trên dưới trong box
     
-    # 1. Xử lý Header (Tự động xuống dòng)
-    header_lines = textwrap.wrap(header.upper(), width=16) # Giảm width xuống để header to không bị tràn
+    # 1. Xử lý Header
+    # Tăng width wrap lên vì font nhỏ hơn (22 ký tự/dòng)
+    header_lines = textwrap.wrap(header.upper(), width=22) 
     
-    # 2. Xử lý Body (Tự động xuống dòng)
+    # 2. Xử lý Body
     raw_lines = content.split('\n')
     body_lines = []
     for line in raw_lines:
-        wrapped = textwrap.wrap(line, width=30) # Body width 30 ký tự
+        # Wrap body dài hơn (38 ký tự/dòng)
+        wrapped = textwrap.wrap(line, width=38)
         body_lines.extend(wrapped)
 
-    # 3. Tính toán chiều cao Box
-    line_height_header = 100
-    line_height_body = 80
-    spacing_header_body = 50
+    # 3. Tính chiều cao Box
+    line_height_header = int(FONT_SIZE_HEADER * 1.3) # Giãn dòng 1.3
+    line_height_body = int(FONT_SIZE_BODY * 1.4)     # Giãn dòng 1.4 cho dễ đọc
+    spacing_header_body = 40 
     
     total_header_height = len(header_lines) * line_height_header
     total_body_height = len(body_lines) * line_height_body
     
-    box_height = padding + total_header_height + spacing_header_body + total_body_height + padding
+    box_height = padding_y + total_header_height + spacing_header_body + total_body_height + padding_y
     
-    # Tọa độ vẽ Box
+    # Giới hạn chiều cao Box không quá 80% màn hình (tránh tràn)
+    max_height = int(H * 0.85)
+    if box_height > max_height:
+        print("Cảnh báo: Nội dung quá dài, có thể bị cắt bớt!")
+        # Ở đây có thể scale font nhỏ hơn nữa nếu muốn, nhưng tạm thời giữ nguyên
+    
+    # Tọa độ
     box_x = (W - box_width) // 2
     box_y = (H - box_height) // 2
     
-    # 4. Vẽ Box Trắng (Đậm hơn chút: 245)
+    # 4. Vẽ Box Trắng Mờ (Opacity 240/255 ~ 94%)
+    # Giả lập bo góc bằng cách vẽ rectangle thường (Pillow vẽ bo góc hơi phức tạp)
     draw.rectangle(
         [(box_x, box_y), (box_x + box_width, box_y + box_height)],
-        fill=(255, 255, 255, 245), 
+        fill=(255, 255, 255, 240), 
         outline=None
     )
+    # Viền box nhạt (tùy chọn)
+    draw.rectangle(
+        [(box_x, box_y), (box_x + box_width, box_y + box_height)],
+        outline=(200, 200, 200, 100),
+        width=2
+    )
 
-    # 5. Vẽ Header (Màu Đỏ)
-    current_y = box_y + padding
+    # 5. Vẽ Header (Màu Đỏ Đậm: #CC0000)
+    current_y = box_y + padding_y
     for line in header_lines:
         text_w = draw.textlength(line, font=font_header)
-        text_x = box_x + (box_width - text_w) // 2
-        draw.text((text_x, current_y), line, font=font_header, fill=(200, 0, 0, 255))
+        text_x = box_x + (box_width - text_w) // 2 # Căn giữa
+        draw.text((text_x, current_y), line, font=font_header, fill=(204, 0, 0, 255))
         current_y += line_height_header
 
-    # 6. Vẽ Body (Màu Đen)
+    # 6. Vẽ Body (Màu Đen: #000000)
     current_y += spacing_header_body
     for line in body_lines:
+        # Body căn trái, lùi vào so với mép box
         draw.text(
-            (box_x + 50, current_y), 
+            (box_x + padding_x, current_y), 
             line, 
             font=font_body, 
             fill=(0, 0, 0, 255)
@@ -165,7 +175,7 @@ def create_list_overlay(header, content, output_img_path):
     img.save(output_img_path)
 
 # ==========================================
-# 1. API: RENDER SHORT VIDEO (PING-PONG)
+# 1. API: SHORT VIDEO (PING-PONG)
 # ==========================================
 @app.post("/merge")
 def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
@@ -228,7 +238,7 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail=str(e))
 
 # ==========================================
-# 2. API: RENDER PODCAST (STATIC IMAGE)
+# 2. API: PODCAST (STATIC IMAGE)
 # ==========================================
 @app.post("/podcast")
 def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
@@ -267,7 +277,7 @@ def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail=str(e))
 
 # ==========================================
-# 3. API: RENDER SHORTS LIST (5S) - RAM OPTIMIZED + FIX FONT
+# 3. API: SHORTS LIST (5S) - RAM OPTIMIZED + FIX STYLE
 # ==========================================
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
@@ -282,7 +292,6 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
         download_file(request.video_url, input_video, "BG Video")
         download_file(request.audio_url, input_audio, "Audio")
         
-        # Sẽ báo lỗi ngay nếu không có font
         create_list_overlay(request.header_text, request.list_content, overlay_img)
 
         cmd = [
