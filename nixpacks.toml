@@ -1,0 +1,6 @@
+# nixpacks.toml
+[phases.setup]
+nixPkgs = ["python3", "ffmpeg", "fontconfig", "freetype", "libfribidi"]
+
+[phases.build]
+cmds = ["mkdir -p /app/fonts"]
