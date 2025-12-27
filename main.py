@@ -3,7 +3,8 @@ import uuid
 import os
 import requests
 import shutil
-import textwrap # Thêm thư viện này để cắt dòng thông minh
+import textwrap
+import glob
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -44,66 +45,87 @@ def download_file(url, filename, file_type="File"):
     }
     try:
         print(f"Đang tải {file_type} từ: {url}")
-        response = requests.get(url, headers=headers, stream=True, timeout=60)
+        response = requests.get(url, headers=headers, stream=True, timeout=30)
         if response.status_code != 200:
+            print(f"-> Thất bại: {response.status_code}")
             return False
         with open(filename, 'wb') as f:
             response.raw.decode_content = True
             shutil.copyfileobj(response.raw, f)
+        print("-> Thành công!")
         return True
     except Exception as e:
-        print(f"Lỗi tải {filename}: {e}")
+        print(f"-> Lỗi: {e}")
         return False
 
-def ensure_font_exists():
-    font_name = "ArialBold.ttf" # Đổi sang Arial cho an toàn và dễ đọc số
-    if not os.path.exists(font_name):
-        # Link font Arial Bold ổn định
-        success = download_file("https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial-Bold.ttf", font_name, "Font")
-        if not success:
-            # Fallback sang Merriweather nếu Arial lỗi
-            download_file("https://github.com/google/fonts/raw/main/ofl/merriweather/Merriweather-Bold.ttf", font_name, "Font")
-            
-    return font_name if os.path.exists(font_name) else None
+# === CHIẾN LƯỢC TẢI FONT 3 LỚP ===
+def get_valid_font_path():
+    font_filename = "MyFont-Bold.ttf"
+    
+    # 1. Kiểm tra nếu đã có file font ngon thì dùng luôn
+    if os.path.exists(font_filename) and os.path.getsize(font_filename) > 10000:
+        return font_filename
 
-# === HÀM VẼ ẢNH OVERLAY (V8 - FIX FONT & WRAP) ===
+    # 2. Danh sách link dự phòng (Roboto, Arial, Merriweather)
+    font_urls = [
+        "https://github.com/google/fonts/raw/main/apache/roboto/static/Roboto-Bold.ttf",
+        "https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial-Bold.ttf",
+        "https://github.com/google/fonts/raw/main/ofl/merriweather/Merriweather-Bold.ttf"
+    ]
+
+    print("Đang tìm tải Font...")
+    for url in font_urls:
+        if download_file(url, font_filename, "Font Candidate"):
+            return font_filename
+    
+    # 3. Nếu tải thất bại, tìm font có sẵn trong Linux (DejaVuSans thường có sẵn)
+    print("Tải font thất bại. Tìm font hệ thống...")
+    system_fonts = glob.glob("/usr/share/fonts/**/*.ttf", recursive=True)
+    if system_fonts:
+        print(f"Tìm thấy font hệ thống: {system_fonts[0]}")
+        return system_fonts[0]
+        
+    return None
+
+# === HÀM VẼ ẢNH OVERLAY (V9 - FINAL FIX) ===
 def create_list_overlay(header, content, output_img_path):
     W, H = 1080, 1920
     img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
-    font_path = ensure_font_exists()
+    font_path = get_valid_font_path()
     
-    # Cấu hình Font (Size to hơn)
-    if font_path:
-        font_header = ImageFont.truetype(font_path, 80) # Header to 80px
-        font_body = ImageFont.truetype(font_path, 55)   # Body to 55px
-    else:
-        # Nếu vẫn không tải được font -> Dùng default (sẽ bị bé, nhưng code này cố gắng tải Arial)
-        font_header = ImageFont.load_default()
+    if not font_path:
+        raise Exception("CRITICAL ERROR: Không tìm thấy bất kỳ Font chữ nào trên server!")
+
+    # Cấu hình Font
+    try:
+        font_header = ImageFont.truetype(font_path, 90) # Header to 90px
+        font_body = ImageFont.truetype(font_path, 60)   # Body to 60px
+    except Exception as e:
+        print(f"Lỗi load font: {e}")
+        # Font dự phòng cuối cùng (dù xấu nhưng to) - Thường ít khi rơi vào đây
+        font_header = ImageFont.load_default() 
         font_body = ImageFont.load_default()
 
     # Cấu hình Box
-    box_width = 950
-    padding = 50
+    box_width = 980 # Rộng hơn chút
+    padding = 60
     
     # 1. Xử lý Header (Tự động xuống dòng)
-    # textwrap.wrap sẽ trả về 1 list các dòng, mỗi dòng max 20 ký tự (với size 80px)
-    header_lines = textwrap.wrap(header.upper(), width=18) 
+    header_lines = textwrap.wrap(header.upper(), width=16) # Giảm width xuống để header to không bị tràn
     
     # 2. Xử lý Body (Tự động xuống dòng)
-    # Input content có thể có \n, ta cần split nó ra trước
     raw_lines = content.split('\n')
     body_lines = []
     for line in raw_lines:
-        # Wrap các dòng dài (max 32 ký tự với size 55px)
-        wrapped = textwrap.wrap(line, width=32)
+        wrapped = textwrap.wrap(line, width=30) # Body width 30 ký tự
         body_lines.extend(wrapped)
 
     # 3. Tính toán chiều cao Box
-    line_height_header = 90
-    line_height_body = 70
-    spacing_header_body = 60 # Khoảng cách giữa Header và Body
+    line_height_header = 100
+    line_height_body = 80
+    spacing_header_body = 50
     
     total_header_height = len(header_lines) * line_height_header
     total_body_height = len(body_lines) * line_height_body
@@ -114,28 +136,26 @@ def create_list_overlay(header, content, output_img_path):
     box_x = (W - box_width) // 2
     box_y = (H - box_height) // 2
     
-    # 4. Vẽ Box Trắng Mờ
+    # 4. Vẽ Box Trắng (Đậm hơn chút: 245)
     draw.rectangle(
         [(box_x, box_y), (box_x + box_width, box_y + box_height)],
-        fill=(255, 255, 255, 240), # Trắng, alpha 240
+        fill=(255, 255, 255, 245), 
         outline=None
     )
 
-    # 5. Vẽ Header (Màu Đỏ, Căn Giữa)
+    # 5. Vẽ Header (Màu Đỏ)
     current_y = box_y + padding
     for line in header_lines:
-        # Tính toán để căn giữa từng dòng header
         text_w = draw.textlength(line, font=font_header)
         text_x = box_x + (box_width - text_w) // 2
-        
         draw.text((text_x, current_y), line, font=font_header, fill=(200, 0, 0, 255))
         current_y += line_height_header
 
-    # 6. Vẽ Body (Màu Đen, Căn Trái)
-    current_y += spacing_header_body # Cách ra một đoạn
+    # 6. Vẽ Body (Màu Đen)
+    current_y += spacing_header_body
     for line in body_lines:
         draw.text(
-            (box_x + 50, current_y), # Lề trái 50px so với box
+            (box_x + 50, current_y), 
             line, 
             font=font_body, 
             fill=(0, 0, 0, 255)
@@ -160,7 +180,7 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
     try:
         download_file(request.video_url, input_video, "Video")
         download_file(request.audio_url, input_audio, "Audio")
-        font_path = ensure_font_exists() or "Arial"
+        font_path = get_valid_font_path()
 
         final_input_video = input_video
         if request.ping_pong:
@@ -190,9 +210,8 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
             last_stream = "[v1]"
 
         if has_sub:
-            # Sửa lại path font cho subtitle filter (cần path tuyệt đối hoặc relative chuẩn)
-            font_path_arg = font_path if font_path else "Arial"
-            style = f"FontName={font_path_arg},FontSize=24,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=30,Alignment=2"
+            font_arg = font_path if font_path else "Arial"
+            style = f"FontName={font_arg},FontSize=24,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=30,Alignment=2"
             filters.append(f"{last_stream}subtitles={subtitle_file}:fontsdir=.:force_style='{style}'[v2]")
             last_stream = "[v2]"
 
@@ -223,7 +242,7 @@ def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
     try:
         download_file(request.image_url, input_image, "Thumbnail")
         download_file(request.audio_url, input_audio, "Audio")
-        font_path = ensure_font_exists()
+        font_path = get_valid_font_path()
 
         has_sub = False
         if request.subtitle_content and len(request.subtitle_content.strip()) > 0:
@@ -248,7 +267,7 @@ def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail=str(e))
 
 # ==========================================
-# 3. API: RENDER SHORTS LIST (5S) - RAM OPTIMIZED
+# 3. API: RENDER SHORTS LIST (5S) - RAM OPTIMIZED + FIX FONT
 # ==========================================
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
@@ -263,7 +282,7 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
         download_file(request.video_url, input_video, "BG Video")
         download_file(request.audio_url, input_audio, "Audio")
         
-        # Tạo Overlay với logic textwrap mới
+        # Sẽ báo lỗi ngay nếu không có font
         create_list_overlay(request.header_text, request.list_content, overlay_img)
 
         cmd = [
