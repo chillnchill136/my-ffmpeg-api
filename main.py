@@ -3,6 +3,7 @@ import uuid
 import os
 import requests
 import shutil
+import textwrap # Thêm thư viện này để cắt dòng thông minh
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -43,87 +44,108 @@ def download_file(url, filename, file_type="File"):
     }
     try:
         print(f"Đang tải {file_type} từ: {url}")
-        response = requests.get(url, headers=headers, stream=True, timeout=120)
+        response = requests.get(url, headers=headers, stream=True, timeout=60)
         if response.status_code != 200:
-            if file_type == "Font": return False
-            raise Exception(f"Mã lỗi {response.status_code}")
+            return False
         with open(filename, 'wb') as f:
             response.raw.decode_content = True
             shutil.copyfileobj(response.raw, f)
         return True
     except Exception as e:
-        if file_type == "Font": return False
-        raise HTTPException(status_code=400, detail=f"Lỗi tải {file_type}: {str(e)}")
+        print(f"Lỗi tải {filename}: {e}")
+        return False
 
 def ensure_font_exists():
-    font_name = "Merriweather-Bold.ttf"
+    font_name = "ArialBold.ttf" # Đổi sang Arial cho an toàn và dễ đọc số
     if not os.path.exists(font_name):
-        download_file("https://github.com/google/fonts/raw/main/ofl/merriweather/Merriweather-Bold.ttf", font_name, "Font")
-    return font_name if os.path.exists(font_name) else "Arial"
+        # Link font Arial Bold ổn định
+        success = download_file("https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial-Bold.ttf", font_name, "Font")
+        if not success:
+            # Fallback sang Merriweather nếu Arial lỗi
+            download_file("https://github.com/google/fonts/raw/main/ofl/merriweather/Merriweather-Bold.ttf", font_name, "Font")
+            
+    return font_name if os.path.exists(font_name) else None
 
-# === HÀM VẼ ẢNH OVERLAY (CHO SHORTS LIST) ===
+# === HÀM VẼ ẢNH OVERLAY (V8 - FIX FONT & WRAP) ===
 def create_list_overlay(header, content, output_img_path):
     W, H = 1080, 1920
     img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
+    
     font_path = ensure_font_exists()
     
-    try:
-        font_header = ImageFont.truetype(font_path, 90)
-        font_body = ImageFont.truetype(font_path, 60)
-    except:
+    # Cấu hình Font (Size to hơn)
+    if font_path:
+        font_header = ImageFont.truetype(font_path, 80) # Header to 80px
+        font_body = ImageFont.truetype(font_path, 55)   # Body to 55px
+    else:
+        # Nếu vẫn không tải được font -> Dùng default (sẽ bị bé, nhưng code này cố gắng tải Arial)
         font_header = ImageFont.load_default()
         font_body = ImageFont.load_default()
 
-    lines = content.split('\n')
-    wrapped_lines = []
-    for line in lines:
-        if len(line) > 28: 
-            wrapped_lines.append(line[:28])
-            wrapped_lines.append(line[28:])
-        else:
-            wrapped_lines.append(line)
-            
-    # Tính toán Box
+    # Cấu hình Box
     box_width = 950
-    line_height = 85
-    header_height = 140
-    box_height = 100 + header_height + (len(wrapped_lines) * line_height) + 50
+    padding = 50
     
+    # 1. Xử lý Header (Tự động xuống dòng)
+    # textwrap.wrap sẽ trả về 1 list các dòng, mỗi dòng max 20 ký tự (với size 80px)
+    header_lines = textwrap.wrap(header.upper(), width=18) 
+    
+    # 2. Xử lý Body (Tự động xuống dòng)
+    # Input content có thể có \n, ta cần split nó ra trước
+    raw_lines = content.split('\n')
+    body_lines = []
+    for line in raw_lines:
+        # Wrap các dòng dài (max 32 ký tự với size 55px)
+        wrapped = textwrap.wrap(line, width=32)
+        body_lines.extend(wrapped)
+
+    # 3. Tính toán chiều cao Box
+    line_height_header = 90
+    line_height_body = 70
+    spacing_header_body = 60 # Khoảng cách giữa Header và Body
+    
+    total_header_height = len(header_lines) * line_height_header
+    total_body_height = len(body_lines) * line_height_body
+    
+    box_height = padding + total_header_height + spacing_header_body + total_body_height + padding
+    
+    # Tọa độ vẽ Box
     box_x = (W - box_width) // 2
     box_y = (H - box_height) // 2
     
-    # Vẽ Box trắng mờ
+    # 4. Vẽ Box Trắng Mờ
     draw.rectangle(
         [(box_x, box_y), (box_x + box_width, box_y + box_height)],
-        fill=(255, 255, 255, 235),
+        fill=(255, 255, 255, 240), # Trắng, alpha 240
         outline=None
     )
 
-    # Vẽ Header (Màu đỏ)
-    header_w = draw.textlength(header.upper(), font=font_header)
-    draw.text(
-        (box_x + (box_width - header_w) / 2, box_y + 50),
-        header.upper(),
-        font=font_header,
-        fill=(200, 0, 0, 255)
-    )
+    # 5. Vẽ Header (Màu Đỏ, Căn Giữa)
+    current_y = box_y + padding
+    for line in header_lines:
+        # Tính toán để căn giữa từng dòng header
+        text_w = draw.textlength(line, font=font_header)
+        text_x = box_x + (box_width - text_w) // 2
+        
+        draw.text((text_x, current_y), line, font=font_header, fill=(200, 0, 0, 255))
+        current_y += line_height_header
 
-    # Vẽ Body (Màu đen)
-    current_y = box_y + 50 + header_height
-    for line in wrapped_lines:
+    # 6. Vẽ Body (Màu Đen, Căn Trái)
+    current_y += spacing_header_body # Cách ra một đoạn
+    for line in body_lines:
         draw.text(
-            (box_x + 60, current_y),
-            line,
-            font=font_body,
+            (box_x + 50, current_y), # Lề trái 50px so với box
+            line, 
+            font=font_body, 
             fill=(0, 0, 0, 255)
         )
-        current_y += line_height
+        current_y += line_height_body
 
     img.save(output_img_path)
 
 # ==========================================
-# 1. API CŨ: RENDER SHORT VIDEO (PING-PONG)
+# 1. API: RENDER SHORT VIDEO (PING-PONG)
 # ==========================================
 @app.post("/merge")
 def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
@@ -138,12 +160,11 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
     try:
         download_file(request.video_url, input_video, "Video")
         download_file(request.audio_url, input_audio, "Audio")
-        font_path = ensure_font_exists()
+        font_path = ensure_font_exists() or "Arial"
 
         final_input_video = input_video
         if request.ping_pong:
             try:
-                # Thêm -threads 1 để tiết kiệm RAM khi tạo ping-pong
                 subprocess.run([
                     "ffmpeg", "-threads", "1", "-i", input_video,
                     "-filter_complex", "[0:v]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]",
@@ -169,8 +190,9 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
             last_stream = "[v1]"
 
         if has_sub:
-            font_name_sub = "Merriweather-Bold" if font_path else "Arial"
-            style = f"FontName={font_name_sub},FontSize=24,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=30,Alignment=2"
+            # Sửa lại path font cho subtitle filter (cần path tuyệt đối hoặc relative chuẩn)
+            font_path_arg = font_path if font_path else "Arial"
+            style = f"FontName={font_path_arg},FontSize=24,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=30,Alignment=2"
             filters.append(f"{last_stream}subtitles={subtitle_file}:fontsdir=.:force_style='{style}'[v2]")
             last_stream = "[v2]"
 
@@ -187,7 +209,7 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail=str(e))
 
 # ==========================================
-# 2. API CŨ: RENDER PODCAST (STATIC IMAGE)
+# 2. API: RENDER PODCAST (STATIC IMAGE)
 # ==========================================
 @app.post("/podcast")
 def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
@@ -209,10 +231,9 @@ def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
                 f.write(request.subtitle_content)
             has_sub = True
 
-        # Thêm -threads 1
         cmd = ["ffmpeg", "-threads", "1", "-loop", "1", "-i", input_image, "-i", input_audio]
         if has_sub:
-            font_name_sub = "Merriweather-Bold" if font_path else "Arial"
+            font_name_sub = font_path if font_path else "Arial"
             style = f"FontName={font_name_sub},FontSize=18,PrimaryColour=&H00FFFFFF,BorderStyle=1,Outline=2,MarginV=50,Alignment=2"
             cmd.extend(["-vf", f"subtitles={subtitle_file}:fontsdir=.:force_style='{style}'", "-tune", "stillimage", "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p"])
         else:
@@ -227,7 +248,7 @@ def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail=str(e))
 
 # ==========================================
-# 3. API MỚI: RENDER SHORTS LIST (5S) - ĐÃ TỐI ƯU RAM
+# 3. API: RENDER SHORTS LIST (5S) - RAM OPTIMIZED
 # ==========================================
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
@@ -242,22 +263,22 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
         download_file(request.video_url, input_video, "BG Video")
         download_file(request.audio_url, input_audio, "Audio")
         
+        # Tạo Overlay với logic textwrap mới
         create_list_overlay(request.header_text, request.list_content, overlay_img)
 
         cmd = [
             "ffmpeg",
-            "-threads", "1",             # QUAN TRỌNG: Giới hạn 1 luồng để không tràn RAM
+            "-threads", "1",
             "-stream_loop", "-1",
             "-i", input_video,
             "-i", input_audio,
             "-i", overlay_img,
             "-filter_complex", 
-            # Giữ nguyên filter, chỉ thêm threads 1 ở đầu
             f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:(iw-ow)/2:(ih-oh)/2[bg];[bg][2:v]overlay=0:0[v]",
             "-map", "[v]", "-map", "1:a",
             "-c:v", "libx264", 
-            "-preset", "ultrafast",      # Render nhanh nhất có thể
-            "-crf", "28",                # Giảm chất lượng một chút xíu để nhẹ gánh (23 -> 28)
+            "-preset", "ultrafast",
+            "-crf", "28",
             "-c:a", "aac",
             "-t", str(request.duration),
             "-y",
