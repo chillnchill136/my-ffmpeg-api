@@ -9,6 +9,11 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
 from PIL import Image, ImageDraw, ImageFont
+import urllib3
+import textwrap
+
+# Tắt cảnh báo SSL cho các request media
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = FastAPI()
 
@@ -39,76 +44,52 @@ def cleanup_files(files):
 
 def download_file(url, filename, file_type="File"):
     if not url: return False
-    # Headers giả lập trình duyệt xịn
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'User-Agent': 'Mozilla/5.0',
     }
     try:
         print(f"Đang tải {file_type} từ: {url}")
-        # Tăng timeout lên 60s
-        response = requests.get(url, headers=headers, stream=True, timeout=60)
+        response = requests.get(url, headers=headers, stream=True, timeout=60, verify=False)
         if response.status_code != 200:
-            print(f"-> Thất bại (Status {response.status_code})")
             return False
         with open(filename, 'wb') as f:
-            response.raw.decode_content = True
             shutil.copyfileobj(response.raw, f)
-        
-        if os.path.getsize(filename) < 5000: # File font thường > 20KB
-            print(f"-> File quá nhỏ: {os.path.getsize(filename)} bytes")
-            os.remove(filename)
-            return False
-            
-        print("-> Thành công!")
         return True
     except Exception as e:
-        print(f"-> Lỗi Exception: {e}")
+        print(f"Lỗi: {e}")
         return False
 
-# === TẢI FONT AN TOÀN (CDN + FALLBACK) ===
-def get_fonts_safe():
+# === HÀM LẤY FONT (LOCAL FIRST) ===
+def get_fonts_local():
     """
-    Ưu tiên 1: Lora (CDN jsDelivr)
-    Ưu tiên 2: Arial (Fallback nếu Lora lỗi)
+    Tìm font ngay trong thư mục hiện tại (do đã upload lên GitHub).
     """
+    # Tên file phải khớp chính xác với file bạn up lên GitHub
     font_bold = "Lora-Bold.ttf"
     font_reg = "Lora-Regular.ttf"
-    
-    # URL qua CDN jsDelivr (Nhanh & Không chặn)
-    url_bold = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Bold.ttf"
-    url_reg = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Regular.ttf"
+    font_backup = "ArialBold.ttf"
 
-    # URL dự phòng Arial (Nếu Lora chết hẳn)
-    url_arial = "https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial-Bold.ttf"
-    arial_path = "ArialBold.ttf"
-
-    # 1. Thử tải Lora
-    has_lora = True
-    if not os.path.exists(font_bold):
-        if not download_file(url_bold, font_bold, "Lora Bold"): has_lora = False
-    
-    if not os.path.exists(font_reg):
-        if not download_file(url_reg, font_reg, "Lora Regular"): has_lora = False
-    
-    # 2. Nếu có Lora -> Trả về Lora
-    if has_lora and os.path.exists(font_bold) and os.path.exists(font_reg):
+    # 1. Kiểm tra Lora Local
+    if os.path.exists(font_bold) and os.path.exists(font_reg):
+        print("-> Đã tìm thấy Font Lora Local!")
         return font_bold, font_reg
     
-    print("-> Không tải được Lora. Chuyển sang dùng Arial (Fallback).")
+    # 2. Kiểm tra Arial Local
+    if os.path.exists(font_backup):
+        print("-> Không thấy Lora, dùng Arial Local!")
+        return font_backup, font_backup
+
+    # 3. Nếu quên upload -> Thử tải cứu cánh (Fallback mạng)
+    print("-> Cảnh báo: Không thấy font trên GitHub, đang thử tải về...")
+    url_bold = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Bold.ttf"
+    url_reg = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Regular.ttf"
     
-    # 3. Tải Arial để cứu vãn
-    if not os.path.exists(arial_path):
-        download_file(url_arial, arial_path, "Arial Fallback")
+    if download_file(url_bold, font_bold, "Lora Bold") and download_file(url_reg, font_reg, "Lora Reg"):
+        return font_bold, font_reg
         
-    if os.path.exists(arial_path):
-        # Trả về Arial cho cả Bold và Reg
-        return arial_path, arial_path
-    
-    # 4. Cùng đường -> Trả về None (dùng font mặc định xấu xí nhưng không crash)
     return None, None
 
-# === HÀM VẼ DÒNG CÓ HIGHLIGHT ===
+# === LOGIC VẼ HIGHLIGHT (GIỮ NGUYÊN) ===
 def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max_width, line_height):
     COLOR_HIGHLIGHT = (204, 0, 0, 255) # Đỏ đậm
     COLOR_NORMAL = (0, 0, 0, 255)      # Đen
@@ -163,29 +144,30 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
 
     return current_y + line_height
 
-# === HÀM VẼ ẢNH OVERLAY (V15) ===
+# === VẼ OVERLAY (V17 - LOCAL FONT) ===
 def create_list_overlay(header, content, output_img_path):
     W, H = 1080, 1920
     img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
-    # Lấy Font an toàn
-    path_bold, path_reg = get_fonts_safe()
+    # LẤY FONT TỪ LOCAL
+    path_bold, path_reg = get_fonts_local()
     
-    # Cấu hình size
     FONT_SIZE_HEADER = 65  
     FONT_SIZE_BODY = 45    
     
-    # Load Font
     try:
         if path_bold:
             font_header = ImageFont.truetype(path_bold, FONT_SIZE_HEADER)
             font_body_bold = ImageFont.truetype(path_bold, FONT_SIZE_BODY)
             font_body_reg = ImageFont.truetype(path_reg, FONT_SIZE_BODY)
         else:
-            raise Exception("No font found")
-    except:
-        print("-> Cảnh báo: Dùng font mặc định hệ thống (xấu)")
+            print("CRITICAL: Không có font nào, dùng default xấu")
+            font_header = ImageFont.load_default()
+            font_body_bold = ImageFont.load_default()
+            font_body_reg = ImageFont.load_default()
+    except Exception as e:
+        print(f"Lỗi load font: {e}")
         font_header = ImageFont.load_default()
         font_body_bold = ImageFont.load_default()
         font_body_reg = ImageFont.load_default()
@@ -197,7 +179,6 @@ def create_list_overlay(header, content, output_img_path):
     padding_x = 60 
     max_text_width = box_width - (padding_x * 2)
 
-    import textwrap
     header_lines = []
     for line in clean_header.split('\n'):
         header_lines.extend(textwrap.wrap(line.strip().upper(), width=20))
@@ -209,7 +190,6 @@ def create_list_overlay(header, content, output_img_path):
     
     h_header = len(header_lines) * line_height_header
     
-    # Tính chiều cao body
     temp_y = 0
     body_items = clean_content.split('\n')
     dummy_draw = ImageDraw.Draw(Image.new('RGBA', (1, 1)))
@@ -252,7 +232,7 @@ def create_list_overlay(header, content, output_img_path):
     img.save(output_img_path)
 
 # ==========================================
-# CÁC API KHÁC
+# CÁC API KHÁC (ĐÃ CẬP NHẬT DÙNG LOCAL FONT)
 # ==========================================
 @app.post("/merge")
 def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
@@ -268,8 +248,9 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
         download_file(request.video_url, input_video, "Video")
         download_file(request.audio_url, input_audio, "Audio")
         
-        path_bold, _ = get_fonts_safe()
-        font_path = path_bold if path_bold else "ArialBold.ttf"
+        # Merge dùng Arial Bold nếu có
+        font_path = "ArialBold.ttf" 
+        if not os.path.exists(font_path): font_path = "" # Hoặc tải fallback nếu muốn
 
         final_input_video = input_video
         if request.ping_pong:
@@ -337,8 +318,9 @@ def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
 
         cmd = ["ffmpeg", "-threads", "1", "-loop", "1", "-i", input_image, "-i", input_audio]
         if has_sub:
-            path_bold, _ = get_fonts_safe()
-            font_name_sub = path_bold if path_bold else "Arial"
+            # Podcast dùng Arial
+            font_path = "ArialBold.ttf"
+            font_name_sub = font_path if os.path.exists(font_path) else "Arial"
             style = f"FontName={font_name_sub},FontSize=18,PrimaryColour=&H00FFFFFF,BorderStyle=1,Outline=2,MarginV=50,Alignment=2"
             cmd.extend(["-vf", f"subtitles={subtitle_file}:fontsdir=.:force_style='{style}'", "-tune", "stillimage", "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p"])
         else:
