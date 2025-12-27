@@ -7,7 +7,7 @@ import urllib3
 import textwrap
 import gc
 import json
-import resource # Thư viện để check RAM hệ thống
+import requests
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -25,40 +25,38 @@ FONT_REG = "Lora-Regular.ttf"
 CDN_BOLD = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Bold.ttf"
 CDN_REG = "https://cdn.jsdelivr.net/gh/google/fonts/ofl/lora/static/Lora-Regular.ttf"
 
-def system_download(url, filename):
+def download_asset(url, filename):
+    """Hàm tải file dùng requests (tốt cho Airtable)"""
+    if not url: return False
+    print(f"-> Đang tải: {filename}...")
     try:
-        subprocess.run(["curl", "-L", "-k", "-o", filename, url], check=True, timeout=60)
-        if os.path.exists(filename) and os.path.getsize(filename) > 5000: return True
-    except: pass
-    return False
-
-# === QUAN TRỌNG: KIỂM TRA RAM THỰC TẾ ===
-def log_memory():
-    """In ra dung lượng RAM giới hạn của Container"""
-    try:
-        # Lấy giới hạn RAM từ file cgroup (chuẩn Docker/Linux)
-        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes", "r") as f:
-            mem_bytes = int(f.read())
-            mem_gb = mem_bytes / (1024**3)
-            print(f"🔥🔥🔥 RAM LIMIT TRÊN SERVER: {mem_gb:.2f} GB 🔥🔥🔥")
-            return mem_gb
-    except:
-        print("-> Không đọc được limit RAM chính xác, thử cách khác...")
+        # Headers giả lập Chrome để tránh bị chặn
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        # Timeout 60s, stream=True để tải file lớn
+        with requests.get(url, headers=headers, stream=True, verify=False, timeout=60) as r:
+            if r.status_code != 200:
+                print(f"Lỗi HTTP {r.status_code} khi tải {url}")
+                return False
+            with open(filename, 'wb') as f:
+                shutil.copyfileobj(r.raw, f)
         
-    try:
-        import psutil
-        mem = psutil.virtual_memory()
-        print(f"🔥🔥🔥 RAM TOTAL HỆ THỐNG: {mem.total / (1024**3):.2f} GB 🔥🔥🔥")
-    except:
-        pass
+        # Kiểm tra file rác (nhỏ hơn 50KB coi như lỗi)
+        if os.path.exists(filename) and os.path.getsize(filename) > 50000:
+            print("-> Tải thành công!")
+            return True
+        else:
+            print("-> File tải về quá nhỏ (có thể là file lỗi).")
+            return False
+    except Exception as e:
+        print(f"-> Exception khi tải: {e}")
+        return False
 
 @app.on_event("startup")
 async def startup_check():
-    print("--- SERVER STARTUP ---")
-    log_memory() # <--- KIỂM TRA NGAY TẠI ĐÂY
-    
-    if not os.path.exists(FONT_BOLD): system_download(CDN_BOLD, FONT_BOLD)
-    if not os.path.exists(FONT_REG): system_download(CDN_REG, FONT_REG)
+    if not os.path.exists(FONT_BOLD): download_asset(CDN_BOLD, FONT_BOLD)
+    if not os.path.exists(FONT_REG): download_asset(CDN_REG, FONT_REG)
 
 class MergeRequest(BaseModel):
     video_url: str = ""
@@ -82,22 +80,10 @@ def cleanup_files(files):
             except: pass
     gc.collect() 
 
-def download_file_req(url, filename):
-    if not url: return False
-    return system_download(url, filename)
-
 def get_ready_font():
     if os.path.exists(FONT_BOLD): 
         return FONT_BOLD, FONT_REG if os.path.exists(FONT_REG) else FONT_BOLD
     return None, None
-
-def probe_video(filepath):
-    try:
-        print(f"--- CHECK FILE: {filepath} ---")
-        cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,codec_name,bit_rate", "-of", "json", filepath]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        print(f"INFO: {result.stdout}")
-    except: pass
 
 def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max_width, line_height):
     COLOR_HIGHLIGHT = (204, 0, 0, 255) 
@@ -205,20 +191,20 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
     subtitle_file = f"{req_id}.srt"
     files_to_clean = [input_video, pingpong_video, input_audio, output_file, subtitle_file]
     try:
-        download_file_req(request.video_url, input_video)
-        download_file_req(request.audio_url, input_audio)
+        download_asset(request.video_url, input_video)
+        download_asset(request.audio_url, input_audio)
         path_bold, _ = get_ready_font() 
         font_path = path_bold if path_bold else "Arial"
         final_input_video = input_video
         if request.ping_pong:
-            try: subprocess.run(["ffmpeg", "-threads", "2", "-i", input_video, "-filter_complex", "[0:v]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-y", pingpong_video], check=True)
+            try: subprocess.run(["ffmpeg", "-threads", "1", "-i", input_video, "-filter_complex", "[0:v]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-y", pingpong_video], check=True)
             except: pass
             final_input_video = pingpong_video
         has_sub = False
         if request.subtitle_content and len(request.subtitle_content.strip()) > 0:
             with open(subtitle_file, "w", encoding="utf-8") as f: f.write(request.subtitle_content)
             has_sub = True
-        cmd = ["ffmpeg", "-threads", "2", "-stream_loop", "-1", "-i", final_input_video, "-i", input_audio, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", "-y", output_file]
+        cmd = ["ffmpeg", "-threads", "1", "-stream_loop", "-1", "-i", final_input_video, "-i", input_audio, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", "-y", output_file]
         subprocess.run(cmd, check=True)
         background_tasks.add_task(cleanup_files, files_to_clean)
         return FileResponse(output_file, media_type='video/mp4', filename="short.mp4")
@@ -230,7 +216,7 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
 def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
     return HTTPException(status_code=200, detail="OK")
 
-# === SHORTS LIST (V31 - SYSTEM MONITOR) ===
+# === API SHORTS LIST (V34 - AIRTABLE SAFE MODE) ===
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
     req_id = str(uuid.uuid4())
@@ -244,46 +230,60 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
     files_to_clean = [input_video, input_audio, overlay_img, normalized_bg, output_file]
 
     try:
-        download_file_req(request.video_url, input_video)
-        download_file_req(request.audio_url, input_audio)
-        probe_video(input_video) # In info video ra log
+        # 1. TẢI FILE (Quan trọng: Xử lý link Airtable)
+        vid_ready = download_asset(request.video_url, input_video)
+        aud_ready = download_asset(request.audio_url, input_audio)
         
+        # Tạo Overlay Text (Luôn làm)
         create_list_overlay(request.header_text, request.list_content, overlay_img)
 
-        # BƯỚC 1: RESIZE (THÊM pix_fmt để tránh lỗi codec lạ)
-        print("-> BƯỚC 1: Hạ cấp video...")
-        cmd_normalize = [
-            "ffmpeg",
-            "-threads", "1", 
-            "-i", input_video,
-            "-t", str(request.duration), 
-            "-vf", "scale=540:-2", # Chỉ ép chiều ngang
-            "-c:v", "libx264", 
-            "-preset", "ultrafast", 
-            "-pix_fmt", "yuv420p", # <-- QUAN TRỌNG: Ép về hệ màu chuẩn, tránh lỗi file lạ
-            "-an",
-            "-y", normalized_bg
-        ]
-        subprocess.run(cmd_normalize, check=True)
+        # 2. XỬ LÝ VIDEO NỀN (An toàn tuyệt đối)
+        bg_processed = False
+        
+        if vid_ready:
+            try:
+                print("-> Đang resize video nền Airtable...")
+                # Resize về 540p nhẹ hều
+                subprocess.run([
+                    "ffmpeg", "-threads", "1", "-y", 
+                    "-i", input_video, 
+                    "-t", str(request.duration),
+                    "-vf", "scale=540:-2", 
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", 
+                    "-pix_fmt", "yuv420p", "-an", 
+                    normalized_bg
+                ], check=True)
+                bg_processed = True
+            except:
+                print("⚠️ Lỗi resize video nền -> Sẽ dùng nền đen.")
+                bg_processed = False
+        else:
+            print("⚠️ Không tải được video nền -> Sẽ dùng nền đen.")
 
-        # BƯỚC 2: GHÉP
-        print("-> BƯỚC 2: Ghép final...")
+        # 3. NẾU KHÔNG CÓ VIDEO NỀN -> TẠO NỀN ĐEN
+        if not bg_processed:
+            print("-> Tạo nền đen thay thế...")
+            subprocess.run([
+                "ffmpeg", "-f", "lavfi", "-i", f"color=c=black:s=540x960:r=30", 
+                "-t", str(request.duration),
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-y", 
+                normalized_bg
+            ], check=True)
+
+        # 4. GHÉP FINAL (Chắc chắn thành công)
+        print("-> Ghép Overlay...")
         cmd_merge = [
-            "ffmpeg",
-            "-threads", "4", 
-            "-stream_loop", "-1",     
-            "-i", normalized_bg,      
-            "-i", input_audio,
-            "-i", overlay_img,
-            "-filter_complex", 
-            "[0:v][2:v]overlay=0:0[v]", 
+            "ffmpeg", "-threads", "4", "-y",
+            "-stream_loop", "-1", 
+            "-i", normalized_bg, 
+            "-i", input_audio, 
+            "-i", overlay_img, 
+            "-filter_complex", "[0:v][2:v]overlay=0:0[v]", 
             "-map", "[v]", 
-            "-map", "1:a",
-            "-c:v", "libx264", 
-            "-preset", "ultrafast",
-            "-c:a", "aac",
-            "-t", str(request.duration),
-            "-y", output_file
+            "-map", "1:a", 
+            "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", 
+            "-t", str(request.duration), 
+            output_file
         ]
         subprocess.run(cmd_merge, check=True)
 
@@ -291,5 +291,5 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
         return FileResponse(output_file, media_type='video/mp4', filename="list_short.mp4")
     except Exception as e:
         cleanup_files(files_to_clean)
-        print(f"LỖI: {e}")
-        raise HTTPException(status_code=400, detail=f"Lỗi: {str(e)}")
+        # Chỉ trả lỗi nếu ngay cả việc tạo nền đen cũng chết (hiếm)
+        raise HTTPException(status_code=400, detail=f"Fatal Error: {str(e)}")
