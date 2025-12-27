@@ -19,31 +19,40 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = FastAPI()
 
-# === CẤU HÌNH FONT LORA (GOOGLE) ===
+# === CẤU HÌNH FONT LORA ===
 FONT_BOLD_PATH = "/tmp/Lora-Bold.ttf"
 FONT_REG_PATH = "/tmp/Lora-Regular.ttf"
 
-# Link GitHub Raw chính chủ
+# Link GitHub Raw chính chủ (Bản Static)
 URL_BOLD = "https://github.com/google/fonts/raw/main/ofl/lora/static/Lora-Bold.ttf"
 URL_REG = "https://github.com/google/fonts/raw/main/ofl/lora/static/Lora-Regular.ttf"
 
-def download_font_force(url, save_path):
-    if os.path.exists(save_path) and os.path.getsize(save_path) > 20000:
-        return
-    print(f"⬇️ Đang tải font: {os.path.basename(save_path)}...")
+def download_font_fresh(url, save_path):
+    """Xóa file cũ, tải file mới để tránh bị corrupt"""
+    if os.path.exists(save_path):
+        try:
+            print(f"♻️ Đang xóa font cũ bị nghi ngờ lỗi: {save_path}")
+            os.remove(save_path)
+        except: pass
+
+    print(f"⬇️ Đang tải mới font: {os.path.basename(save_path)}...")
     try:
         r = requests.get(url, stream=True, verify=False, timeout=30)
         if r.status_code == 200:
             with open(save_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
-            print("✅ Tải font OK")
-    except: pass
+            print(f"✅ Tải xong! Size: {os.path.getsize(save_path)} bytes")
+        else:
+            print(f"❌ Lỗi HTTP {r.status_code}")
+    except Exception as e:
+        print(f"❌ Lỗi tải: {e}")
 
 @app.on_event("startup")
 async def startup_check():
-    download_font_force(URL_BOLD, FONT_BOLD_PATH)
-    download_font_force(URL_REG, FONT_REG_PATH)
+    # BẮT BUỘC TẢI LẠI ĐỂ FIX LỖI FILE HỎNG
+    download_font_fresh(URL_BOLD, FONT_BOLD_PATH)
+    download_font_fresh(URL_REG, FONT_REG_PATH)
 
 class MergeRequest(BaseModel):
     video_url: str = ""
@@ -82,27 +91,16 @@ def download_file_req(url, filename):
     if not url: return False
     return system_download(url, filename)
 
-# === HÀM LẤY KÍCH THƯỚC VIDEO GỐC ===
 def get_video_dimensions(filepath):
-    """Trả về (width, height) của video"""
     try:
-        cmd = [
-            "ffprobe", "-v", "error", 
-            "-select_streams", "v:0", 
-            "-show_entries", "stream=width,height", 
-            "-of", "json", filepath
-        ]
+        cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", filepath]
         result = subprocess.run(cmd, capture_output=True, text=True)
         data = json.loads(result.stdout)
-        width = data['streams'][0]['width']
-        height = data['streams'][0]['height']
-        print(f"📐 Kích thước Video gốc: {width}x{height}")
-        return width, height
-    except Exception as e:
-        print(f"⚠️ Lỗi probe video: {e}. Dùng mặc định 1080x1920")
-        return 1080, 1920 # Fallback an toàn
+        return data['streams'][0]['width'], data['streams'][0]['height']
+    except:
+        return 1080, 1920
 
-# === VẼ TEXT (DYNAMIC SIZE) ===
+# === VẼ TEXT (DYNAMIC SIZE + ROBOTO FALLBACK) ===
 def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max_width, line_height):
     COLOR_HIGHLIGHT = (204, 0, 0, 255) 
     COLOR_NORMAL = (0, 0, 0, 255)      
@@ -145,27 +143,21 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
     return current_y + line_height
 
 def create_list_overlay(header, content, output_img_path, target_w, target_h):
-    # Tạo Canvas khớp 100% với video gốc
     img = Image.new('RGBA', (target_w, target_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
-    # === CÔNG THỨC TÍNH CỠ CHỮ TỰ ĐỘNG ===
-    # Header chiếm khoảng 8% chiều rộng video
-    # Body chiếm khoảng 5.5% chiều rộng video
-    FONT_SIZE_HEADER = int(target_w * 0.08) 
-    FONT_SIZE_BODY = int(target_w * 0.055)
+    # Tính size chữ theo tỷ lệ chiều rộng
+    FONT_SIZE_HEADER = int(target_w * 0.075) # 7.5% width
+    FONT_SIZE_BODY = int(target_w * 0.05)    # 5% width
     
-    # Đảm bảo không quá bé
-    if FONT_SIZE_HEADER < 20: FONT_SIZE_HEADER = 20
-    if FONT_SIZE_BODY < 14: FONT_SIZE_BODY = 14
-
-    print(f"🔠 Font Size Dynamic: Header={FONT_SIZE_HEADER}, Body={FONT_SIZE_BODY}")
-
+    # Load Font Tuyệt đối
     try:
         font_header = ImageFont.truetype(FONT_BOLD_PATH, FONT_SIZE_HEADER)
         font_body_bold = ImageFont.truetype(FONT_BOLD_PATH, FONT_SIZE_BODY)
         font_body_reg = ImageFont.truetype(FONT_REG_PATH, FONT_SIZE_BODY)
-    except:
+        print("-> Đã load Lora Font thành công!")
+    except Exception as e:
+        print(f"-> Lỗi load font: {e}. Đang dùng Default (sẽ lỗi TV)")
         font_header = ImageFont.load_default()
         font_body_bold = ImageFont.load_default()
         font_body_reg = ImageFont.load_default()
@@ -173,21 +165,21 @@ def create_list_overlay(header, content, output_img_path, target_w, target_h):
     clean_header = header.replace("\\n", "\n").replace("\\N", "\n")
     clean_content = content.replace("\\n", "\n").replace("\\N", "\n")
 
-    # Box rộng 90% video, căn giữa
     box_width = int(target_w * 0.9)
-    padding_x = int(target_w * 0.04) # Padding 4%
+    padding_x = int(target_w * 0.04)
     max_text_width = box_width - (padding_x * 2)
 
     import textwrap
     header_lines = []
-    # Tính toán số ký tự wrap dựa trên độ rộng (ước lượng)
-    chars_per_line = int(max_text_width / (FONT_SIZE_HEADER * 0.55)) 
+    # Tính số ký tự wrap dựa trên độ rộng chữ ước tính
+    # 0.55 là hệ số trung bình chiều rộng ký tự so với chiều cao
+    chars_header = int(max_text_width / (FONT_SIZE_HEADER * 0.5))
     for line in clean_header.split('\n'):
-        header_lines.extend(textwrap.wrap(line.strip().upper(), width=chars_per_line))
+        header_lines.extend(textwrap.wrap(line.strip().upper(), width=chars_header))
 
-    line_height_header = int(FONT_SIZE_HEADER * 1.2)
-    line_height_body = int(FONT_SIZE_BODY * 1.35)
-    spacing_header_body = int(target_h * 0.03) # Cách nhau 3% chiều cao
+    line_height_header = int(FONT_SIZE_HEADER * 1.25)
+    line_height_body = int(FONT_SIZE_BODY * 1.4)
+    spacing_header_body = int(target_h * 0.03) 
     padding_y = int(target_h * 0.04)
     
     h_header = len(header_lines) * line_height_header
@@ -198,7 +190,7 @@ def create_list_overlay(header, content, output_img_path, target_w, target_h):
     for item in body_items:
         if not item.strip(): continue
         temp_y = draw_highlighted_line(dummy_draw, 0, temp_y, item, font_body_bold, font_body_reg, max_text_width, line_height_body)
-        temp_y += int(target_h * 0.015) # Spacing item
+        temp_y += int(target_h * 0.015) 
     
     h_body = temp_y
     box_height = padding_y + h_header + spacing_header_body + h_body + padding_y
@@ -206,13 +198,11 @@ def create_list_overlay(header, content, output_img_path, target_w, target_h):
     box_x = (target_w - box_width) // 2
     box_y = (target_h - box_height) // 2
     
-    # Vẽ Box Trắng
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], fill=(255, 255, 255, 245), outline=None)
-    border_w = int(target_w * 0.005) # Border dày 0.5%
-    if border_w < 1: border_w = 1
+    border_w = int(target_w * 0.005)
+    if border_w < 2: border_w = 2
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], outline=(200, 200, 200, 150), width=border_w)
 
-    # Vẽ Header
     current_y = box_y + padding_y
     for line in header_lines:
         text_w = draw.textlength(line, font=font_header)
@@ -220,7 +210,6 @@ def create_list_overlay(header, content, output_img_path, target_w, target_h):
         draw.text((text_x, current_y), line, font=font_header, fill=(204, 0, 0, 255))
         current_y += line_height_header
 
-    # Vẽ Body
     current_y += spacing_header_body
     start_x = box_x + padding_x
     for item in body_items:
@@ -260,7 +249,6 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
 def create_podcast(request: MergeRequest, background_tasks: BackgroundTasks):
     return HTTPException(status_code=200, detail="OK")
 
-# === SHORTS LIST (V42 - DYNAMIC RESOLUTION) ===
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
     req_id = str(uuid.uuid4())
@@ -271,23 +259,16 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
     files_to_clean = [input_video, input_audio, overlay_img, output_file]
 
     try:
-        # 1. Tải file
         vid_ok = download_file_req(request.video_url, input_video)
         aud_ok = download_file_req(request.audio_url, input_audio)
         
-        # 2. ĐỌC KÍCH THƯỚC VIDEO GỐC
-        target_w, target_h = 1080, 1920 # Mặc định
+        target_w, target_h = 1080, 1920 
         if vid_ok:
             target_w, target_h = get_video_dimensions(input_video)
         
-        # 3. TẠO OVERLAY KHỚP KÍCH THƯỚC ĐÓ
-        # Hàm này giờ đã thông minh, tự tính size chữ theo target_w
         create_list_overlay(request.header_text, request.list_content, overlay_img, target_w, target_h)
 
-        # 4. GHÉP FINAL (KHÔNG RESIZE)
-        # Giữ nguyên chất lượng video gốc
-        print(f"-> Ghép Overlay vào video {target_w}x{target_h}...")
-        
+        print(f"-> Ghép Overlay vào video {target_w}x{target_h} (No Loop)...")
         if vid_ok:
             subprocess.run([
                 "ffmpeg", "-threads", "4", 
@@ -301,7 +282,7 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
                 output_file
             ], check=True)
         else:
-             # Fallback nền đen nếu không tải được video
+            # Fallback
             subprocess.run([
                 "ffmpeg", "-loop", "1", "-y",
                 "-i", overlay_img,
