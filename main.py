@@ -10,9 +10,9 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
 from PIL import Image, ImageDraw, ImageFont, features
+import urllib3
 
 # Tắt cảnh báo SSL
-import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = FastAPI()
@@ -26,7 +26,6 @@ if not os.path.exists(FONT_DIR): os.makedirs(FONT_DIR, exist_ok=True)
 FONT_BOLD_PATH = os.path.join(FONT_DIR, "Lora-Bold.ttf")
 FONT_REG_PATH = os.path.join(FONT_DIR, "Lora-Regular.ttf")
 
-# Link Google Font Chính Chủ (Cyreal Repo)
 URL_BOLD = "https://github.com/cyrealtype/Lora-Cyrillic/raw/main/fonts/ttf/Lora-Bold.ttf"
 URL_REG = "https://github.com/cyrealtype/Lora-Cyrillic/raw/main/fonts/ttf/Lora-Regular.ttf"
 
@@ -78,28 +77,33 @@ def cleanup_files(files):
     gc.collect() 
 
 def download_file(url, filename):
-    if not url: return False
+    print(f"⬇️ Đang tải file từ: {url}") # Log URL để debug
+    if not url: 
+        print("❌ URL rỗng!")
+        return False
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
+        # Thêm timeout 60s
         with requests.get(url, headers=headers, stream=True, verify=False, timeout=60) as r:
-            if r.status_code != 200: return False
+            if r.status_code != 200: 
+                print(f"❌ Lỗi HTTP {r.status_code}")
+                return False
             with open(filename, 'wb') as f:
                 shutil.copyfileobj(r.raw, f)
-        if os.path.exists(filename) and os.path.getsize(filename) > 1000: return True
-    except: pass
-    return False
-
-def get_video_dimensions(filepath):
-    try:
-        cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", filepath]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        data = json.loads(result.stdout)
-        return data['streams'][0]['width'], data['streams'][0]['height']
-    except:
-        return 1080, 1920
+        
+        # Check size file tải về
+        if os.path.exists(filename) and os.path.getsize(filename) > 100: 
+            print("✅ Tải thành công!")
+            return True
+        else:
+            print("❌ File tải về quá nhẹ (có thể lỗi)")
+            return False
+    except Exception as e:
+        print(f"❌ Exception download: {str(e)}")
+        return False
 
 # ==========================================
-# 3. DRAWING LOGIC (Watermark Added Here)
+# 3. DRAWING LOGIC (Standard HD 1080x1920)
 # ==========================================
 def get_font_objects(size_header, size_body):
     try:
@@ -156,25 +160,22 @@ def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max
             
     return current_y + line_height
 
-def create_list_overlay(header, content, output_img_path, target_w, target_h):
+def create_list_overlay(header, content, output_img_path):
+    target_w, target_h = 1080, 1920
     img = Image.new('RGBA', (target_w, target_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
-    # Fonts
     FONT_SIZE_HEADER = int(target_w * 0.07)
     FONT_SIZE_BODY = int(target_w * 0.05)
     font_header, font_body_bold, font_body_reg = get_font_objects(FONT_SIZE_HEADER, FONT_SIZE_BODY)
 
-    # Box Config
     box_width = int(target_w * 0.88)
     padding_x = int(target_w * 0.06)
     max_text_width = box_width - (padding_x * 2)
 
-    # Clean Text
     clean_header = header.replace("\\n", "\n").replace("\\N", "\n")
     clean_content = content.replace("\\n", "\n").replace("\\N", "\n")
 
-    # Measure Header
     import textwrap
     header_lines = []
     avg_char_width = FONT_SIZE_HEADER * 0.65
@@ -182,14 +183,12 @@ def create_list_overlay(header, content, output_img_path, target_w, target_h):
     for line in clean_header.split('\n'):
         header_lines.extend(textwrap.wrap(line.strip().upper(), width=chars_per_line))
 
-    # Dimensions
     line_height_header = int(FONT_SIZE_HEADER * 1.3)
     line_height_body = int(FONT_SIZE_BODY * 1.5)
     spacing_header_body = int(target_h * 0.035) 
     padding_y = int(target_h * 0.04)
     h_header = len(header_lines) * line_height_header
     
-    # Measure Body
     temp_y = 0
     body_items = clean_content.split('\n')
     dummy_draw = ImageDraw.Draw(Image.new('RGBA', (1, 1)))
@@ -200,18 +199,14 @@ def create_list_overlay(header, content, output_img_path, target_w, target_h):
     h_body = temp_y
     
     box_height = padding_y + h_header + spacing_header_body + h_body + padding_y
-    
-    # Box Position
     box_x = (target_w - box_width) // 2
     box_y = (target_h - box_height) // 2
     
-    # Draw Box
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], fill=(255, 255, 255, 245), outline=None)
     border_w = int(target_w * 0.006)
     if border_w < 2: border_w = 2
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], outline=(200, 200, 200, 150), width=border_w)
 
-    # Draw Header
     current_y = box_y + padding_y
     for line in header_lines:
         text_w = draw.textlength(line, font=font_header)
@@ -219,7 +214,6 @@ def create_list_overlay(header, content, output_img_path, target_w, target_h):
         draw.text((text_x, current_y), line, font=font_header, fill=(204, 0, 0, 255))
         current_y += line_height_header
 
-    # Draw Body
     current_y += spacing_header_body
     start_x = box_x + padding_x
     for item in body_items:
@@ -227,23 +221,13 @@ def create_list_overlay(header, content, output_img_path, target_w, target_h):
         current_y = draw_highlighted_line(draw, start_x, current_y, item, font_body_bold, font_body_reg, max_text_width, line_height_body)
         current_y += int(target_h * 0.015) 
 
-    # --- WATERMARK LOGIC (NEW) ---
     try:
         wm_text = "luangiai.vn"
-        # Size bé hơn body một chút (4% chiều rộng)
         wm_size = int(target_w * 0.04) 
         font_wm = ImageFont.truetype(FONT_BOLD_PATH, wm_size)
-        
-        # Đo chiều rộng chữ
         wm_w = draw.textlength(wm_text, font=font_wm)
-        
-        # Căn giữa theo chiều ngang
         wm_x = (target_w - wm_w) // 2
-        
-        # Căn dưới đáy, cách đáy 5% chiều cao
         wm_y = target_h - int(target_h * 0.05) - wm_size
-        
-        # Màu xám nhạt (220, 220, 220), độ trong suốt Alpha = 80 (khoảng 30%)
         draw.text((wm_x, wm_y), wm_text, font=font_wm, fill=(220, 220, 220, 80))
     except: pass
 
@@ -262,8 +246,11 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
     clean_list = [input_video, pingpong_video, input_audio, output_file]
 
     try:
-        download_file(request.video_url, input_video)
-        download_file(request.audio_url, input_audio)
+        if not download_file(request.video_url, input_video):
+            raise Exception(f"Failed to download Video: {request.video_url}")
+        
+        if not download_file(request.audio_url, input_audio):
+            raise Exception(f"Failed to download Audio: {request.audio_url}")
         
         final_input_video = input_video
         if request.ping_pong:
@@ -280,7 +267,7 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
             except: pass 
 
         cmd = [
-            "ffmpeg", "-threads", "4", "-y",
+            "ffmpeg", "-threads", "2", "-y",
             "-stream_loop", "-1",       
             "-i", final_input_video,    
             "-i", input_audio,          
@@ -296,10 +283,11 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
         return FileResponse(output_file, media_type='video/mp4', filename="blog_video.mp4")
     except Exception as e:
         cleanup_files(clean_list)
+        # In lỗi chi tiết ra response để user đọc
         raise HTTPException(status_code=400, detail=str(e))
 
 # ==========================================
-# 5. API 2: /shorts_list (SHORTS VIDEO)
+# 5. API 2: /shorts_list (SAFE MODE 1080p)
 # ==========================================
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
@@ -312,34 +300,36 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
     clean_list = [input_video, processed_bg, input_audio, overlay_img, output_file]
 
     try:
-        vid_ok = download_file(request.video_url, input_video)
-        aud_ok = download_file(request.audio_url, input_audio)
+        # CHECK NGAY LẬP TỨC
+        if not download_file(request.video_url, input_video):
+            raise Exception(f"KHÔNG TẢI ĐƯỢC VIDEO NỀN! Kiểm tra URL: {request.video_url}")
         
-        target_w, target_h = 1080, 1920 
-        if vid_ok:
-            target_w, target_h = get_video_dimensions(input_video)
+        if not download_file(request.audio_url, input_audio):
+            raise Exception(f"KHÔNG TẢI ĐƯỢC AUDIO! Kiểm tra URL: {request.audio_url}")
         
-        # Tạo Overlay có Watermark
-        create_list_overlay(request.header_text, request.list_content, overlay_img, target_w, target_h)
+        # 1. TẠO OVERLAY CỐ ĐỊNH 1080x1920
+        create_list_overlay(request.header_text, request.list_content, overlay_img)
 
+        # 2. XỬ LÝ VIDEO NỀN (PingPong + Resize)
         bg_ready = False
-        if vid_ok:
-            try:
-                subprocess.run([
-                    "ffmpeg", "-threads", "2", "-y",
-                    "-i", input_video,
-                    "-filter_complex", 
-                    f"[0:v]scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h}[scaled];[scaled]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]",
-                    "-map", "[v]",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                    processed_bg
-                ], check=True)
-                bg_ready = True
-            except: pass
+        try:
+            subprocess.run([
+                "ffmpeg", "-threads", "2", "-y",
+                "-i", input_video,
+                "-filter_complex", 
+                f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[scaled];[scaled]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]",
+                "-map", "[v]",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                processed_bg
+            ], check=True)
+            bg_ready = True
+        except: pass
 
+        # 3. GHÉP FINAL
+        print("-> Ghép Final: Loop Video khớp Audio...")
         if bg_ready:
             subprocess.run([
-                "ffmpeg", "-threads", "4", "-y",
+                "ffmpeg", "-threads", "2", "-y",
                 "-stream_loop", "-1",       
                 "-i", processed_bg,         
                 "-i", input_audio,          
@@ -351,18 +341,11 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
                 output_file
             ], check=True)
         else:
-            subprocess.run([
-                "ffmpeg", "-loop", "1", "-y",
-                "-i", overlay_img,
-                "-i", input_audio,
-                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage", "-pix_fmt", "yuv420p",
-                "-c:a", "aac",
-                "-shortest",
-                output_file
-            ], check=True)
+            raise Exception("Lỗi xử lý video nền (FFmpeg Fail)")
 
         background_tasks.add_task(cleanup_files, clean_list)
         return FileResponse(output_file, media_type='video/mp4', filename="list_short.mp4")
     except Exception as e:
         cleanup_files(clean_list)
+        # Ném lỗi 400 kèm nguyên nhân chi tiết
         raise HTTPException(status_code=400, detail=str(e))
