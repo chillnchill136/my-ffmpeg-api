@@ -5,6 +5,7 @@ import shutil
 import requests
 import gc
 import json
+import random  # <--- Thêm thư viện random
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -77,13 +78,12 @@ def cleanup_files(files):
     gc.collect() 
 
 def download_file(url, filename):
-    print(f"⬇️ Đang tải file từ: {url}") # Log URL để debug
+    print(f"⬇️ Đang tải file từ: {url}")
     if not url: 
         print("❌ URL rỗng!")
         return False
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        # Thêm timeout 60s
         with requests.get(url, headers=headers, stream=True, verify=False, timeout=60) as r:
             if r.status_code != 200: 
                 print(f"❌ Lỗi HTTP {r.status_code}")
@@ -91,19 +91,18 @@ def download_file(url, filename):
             with open(filename, 'wb') as f:
                 shutil.copyfileobj(r.raw, f)
         
-        # Check size file tải về
         if os.path.exists(filename) and os.path.getsize(filename) > 100: 
             print("✅ Tải thành công!")
             return True
         else:
-            print("❌ File tải về quá nhẹ (có thể lỗi)")
+            print("❌ File tải về quá nhẹ")
             return False
     except Exception as e:
         print(f"❌ Exception download: {str(e)}")
         return False
 
 # ==========================================
-# 3. DRAWING LOGIC (Standard HD 1080x1920)
+# 3. DRAWING LOGIC & HASH KILLER
 # ==========================================
 def get_font_objects(size_header, size_body):
     try:
@@ -117,121 +116,104 @@ def get_font_objects(size_header, size_body):
 def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max_width, line_height):
     COLOR_HIGHLIGHT = (204, 0, 0, 255) 
     COLOR_NORMAL = (0, 0, 0, 255)      
-    
     if ":" in text:
         parts = text.split(":", 1)
         part_bold = parts[0] + ":"
         part_reg = parts[1]
     else:
-        part_bold = ""
-        part_reg = text
-
+        part_bold = "", part_reg = text
     current_x = x_start
     current_y = y_start
-    
     if part_bold:
         words = part_bold.split()
         for i, word in enumerate(words):
             suffix = " " if i < len(words) else "" 
             word_w = draw.textlength(word + suffix, font=font_bold)
             if current_x + word_w > x_start + max_width:
-                current_x = x_start
-                current_y += line_height
+                current_x = x_start; current_y += line_height
             draw.text((current_x, current_y), word, font=font_bold, fill=COLOR_HIGHLIGHT)
             current_x += word_w
-
     if part_reg:
         words = part_reg.split()
         if part_bold and current_x > x_start:
-             space_w = draw.textlength(" ", font=font_reg)
-             current_x += space_w
+             space_w = draw.textlength(" ", font=font_reg); current_x += space_w
         for i, word in enumerate(words):
             word_w = draw.textlength(word, font=font_reg)
             space_w = draw.textlength(" ", font=font_reg)
             if current_x + word_w > x_start + max_width:
-                current_x = x_start
-                current_y += line_height
-                draw.text((current_x, current_y), word, font=font_reg, fill=COLOR_NORMAL)
-                current_x += word_w
-            else:
-                draw.text((current_x, current_y), word, font=font_reg, fill=COLOR_NORMAL)
-                current_x += word_w
+                current_x = x_start; current_y += line_height
+            draw.text((current_x, current_y), word, font=font_reg, fill=COLOR_NORMAL)
+            current_x += word_w; 
             if i < len(words) - 1: current_x += space_w
-            
     return current_y + line_height
 
 def create_list_overlay(header, content, output_img_path):
     target_w, target_h = 1080, 1920
     img = Image.new('RGBA', (target_w, target_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    
-    FONT_SIZE_HEADER = int(target_w * 0.07)
-    FONT_SIZE_BODY = int(target_w * 0.05)
+    FONT_SIZE_HEADER = int(target_w * 0.07); FONT_SIZE_BODY = int(target_w * 0.05)
     font_header, font_body_bold, font_body_reg = get_font_objects(FONT_SIZE_HEADER, FONT_SIZE_BODY)
-
-    box_width = int(target_w * 0.88)
-    padding_x = int(target_w * 0.06)
-    max_text_width = box_width - (padding_x * 2)
-
+    box_width = int(target_w * 0.88); padding_x = int(target_w * 0.06); max_text_width = box_width - (padding_x * 2)
     clean_header = header.replace("\\n", "\n").replace("\\N", "\n")
     clean_content = content.replace("\\n", "\n").replace("\\N", "\n")
-
     import textwrap
     header_lines = []
-    avg_char_width = FONT_SIZE_HEADER * 0.65
-    chars_per_line = int(max_text_width / avg_char_width)
-    for line in clean_header.split('\n'):
-        header_lines.extend(textwrap.wrap(line.strip().upper(), width=chars_per_line))
-
-    line_height_header = int(FONT_SIZE_HEADER * 1.3)
-    line_height_body = int(FONT_SIZE_BODY * 1.5)
-    spacing_header_body = int(target_h * 0.035) 
-    padding_y = int(target_h * 0.04)
+    chars_per_line = int(max_text_width / (FONT_SIZE_HEADER * 0.65))
+    for line in clean_header.split('\n'): header_lines.extend(textwrap.wrap(line.strip().upper(), width=chars_per_line))
+    line_height_header = int(FONT_SIZE_HEADER * 1.3); line_height_body = int(FONT_SIZE_BODY * 1.5)
+    spacing_header_body = int(target_h * 0.035); padding_y = int(target_h * 0.04)
     h_header = len(header_lines) * line_height_header
-    
-    temp_y = 0
-    body_items = clean_content.split('\n')
-    dummy_draw = ImageDraw.Draw(Image.new('RGBA', (1, 1)))
+    temp_y = 0; body_items = clean_content.split('\n'); dummy_draw = ImageDraw.Draw(Image.new('RGBA', (1, 1)))
     for item in body_items:
         if not item.strip(): continue
         temp_y = draw_highlighted_line(dummy_draw, 0, temp_y, item, font_body_bold, font_body_reg, max_text_width, line_height_body)
         temp_y += int(target_h * 0.015) 
     h_body = temp_y
-    
     box_height = padding_y + h_header + spacing_header_body + h_body + padding_y
-    box_x = (target_w - box_width) // 2
-    box_y = (target_h - box_height) // 2
-    
+    box_x = (target_w - box_width) // 2; box_y = (target_h - box_height) // 2
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], fill=(255, 255, 255, 245), outline=None)
-    border_w = int(target_w * 0.006)
+    border_w = int(target_w * 0.006); 
     if border_w < 2: border_w = 2
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], outline=(200, 200, 200, 150), width=border_w)
-
     current_y = box_y + padding_y
     for line in header_lines:
-        text_w = draw.textlength(line, font=font_header)
-        text_x = box_x + (box_width - text_w) // 2 
-        draw.text((text_x, current_y), line, font=font_header, fill=(204, 0, 0, 255))
-        current_y += line_height_header
-
-    current_y += spacing_header_body
-    start_x = box_x + padding_x
+        text_w = draw.textlength(line, font=font_header); text_x = box_x + (box_width - text_w) // 2 
+        draw.text((text_x, current_y), line, font=font_header, fill=(204, 0, 0, 255)); current_y += line_height_header
+    current_y += spacing_header_body; start_x = box_x + padding_x
     for item in body_items:
         if not item.strip(): continue
         current_y = draw_highlighted_line(draw, start_x, current_y, item, font_body_bold, font_body_reg, max_text_width, line_height_body)
         current_y += int(target_h * 0.015) 
-
     try:
-        wm_text = "luangiai.vn"
-        wm_size = int(target_w * 0.04) 
+        wm_text = "luangiai.vn"; wm_size = int(target_w * 0.04) 
         font_wm = ImageFont.truetype(FONT_BOLD_PATH, wm_size)
-        wm_w = draw.textlength(wm_text, font=font_wm)
-        wm_x = (target_w - wm_w) // 2
+        wm_w = draw.textlength(wm_text, font=font_wm); wm_x = (target_w - wm_w) // 2
         wm_y = target_h - int(target_h * 0.05) - wm_size
         draw.text((wm_x, wm_y), wm_text, font=font_wm, fill=(220, 220, 220, 80))
     except: pass
-
     img.save(output_img_path)
+
+def get_random_hash_filter():
+    """Tạo chuỗi filter ngẫu nhiên để thay đổi Hash Video"""
+    filters = []
+    
+    # 1. Random Mirror (Lật gương - Tỷ lệ 50%)
+    if random.choice([True, False]):
+        filters.append("hflip") # Lật ngang
+    
+    # 2. Subtle Noise (Nhiễu hạt cực nhẹ - Luôn có)
+    # c0s=2: noise strength 2% (rất nhỏ)
+    # allf=t: temporal noise (nhiễu động) -> Pixel thay đổi liên tục
+    filters.append("noise=c0s=2:allf=t")
+    
+    # 3. Micro Color Eq (Chỉnh màu vi mô - Luôn có)
+    # brightness thay đổi từ -0.02 đến +0.02
+    # saturation thay đổi từ 0.95 đến 1.05
+    bri = random.uniform(-0.02, 0.02)
+    sat = random.uniform(0.95, 1.05)
+    filters.append(f"eq=brightness={bri:.3f}:saturation={sat:.3f}")
+
+    return ",".join(filters)
 
 # ==========================================
 # 4. API 1: /merge (BLOG VIDEO)
@@ -246,25 +228,28 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
     clean_list = [input_video, pingpong_video, input_audio, output_file]
 
     try:
-        if not download_file(request.video_url, input_video):
-            raise Exception(f"Failed to download Video: {request.video_url}")
-        
-        if not download_file(request.audio_url, input_audio):
-            raise Exception(f"Failed to download Audio: {request.audio_url}")
+        if not download_file(request.video_url, input_video): raise Exception(f"DL Fail Video")
+        if not download_file(request.audio_url, input_audio): raise Exception(f"DL Fail Audio")
         
         final_input_video = input_video
         if request.ping_pong:
             try:
+                # Thêm Hash Filter vào trước khi split
+                hash_filters = get_random_hash_filter()
+                print(f"Applying Hash Filters: {hash_filters}")
+                
                 subprocess.run([
                     "ffmpeg", "-threads", "2", "-y",
                     "-i", input_video, 
-                    "-filter_complex", "[0:v]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]", 
+                    "-filter_complex", 
+                    f"[0:v]{hash_filters}[hashed];[hashed]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]", 
                     "-map", "[v]", 
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", 
                     pingpong_video
                 ], check=True)
                 final_input_video = pingpong_video
-            except: pass 
+            except Exception as e:
+                print(f"PingPong Fail: {e}")
 
         cmd = [
             "ffmpeg", "-threads", "2", "-y",
@@ -278,16 +263,14 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
             output_file
         ]
         subprocess.run(cmd, check=True)
-        
         background_tasks.add_task(cleanup_files, clean_list)
         return FileResponse(output_file, media_type='video/mp4', filename="blog_video.mp4")
     except Exception as e:
         cleanup_files(clean_list)
-        # In lỗi chi tiết ra response để user đọc
         raise HTTPException(status_code=400, detail=str(e))
 
 # ==========================================
-# 5. API 2: /shorts_list (SAFE MODE 1080p)
+# 5. API 2: /shorts_list (SAFE MODE + HASH KILLER)
 # ==========================================
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
@@ -300,33 +283,32 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
     clean_list = [input_video, processed_bg, input_audio, overlay_img, output_file]
 
     try:
-        # CHECK NGAY LẬP TỨC
-        if not download_file(request.video_url, input_video):
-            raise Exception(f"KHÔNG TẢI ĐƯỢC VIDEO NỀN! Kiểm tra URL: {request.video_url}")
+        if not download_file(request.video_url, input_video): raise Exception(f"DL Fail Video")
+        if not download_file(request.audio_url, input_audio): raise Exception(f"DL Fail Audio")
         
-        if not download_file(request.audio_url, input_audio):
-            raise Exception(f"KHÔNG TẢI ĐƯỢC AUDIO! Kiểm tra URL: {request.audio_url}")
-        
-        # 1. TẠO OVERLAY CỐ ĐỊNH 1080x1920
         create_list_overlay(request.header_text, request.list_content, overlay_img)
 
-        # 2. XỬ LÝ VIDEO NỀN (PingPong + Resize)
+        # XỬ LÝ NỀN: Resize 1080p + HASH KILLER + PingPong
         bg_ready = False
         try:
+            hash_filters = get_random_hash_filter() # Sinh filter ngẫu nhiên
+            print(f"Applying Hash Filters: {hash_filters}")
+
             subprocess.run([
                 "ffmpeg", "-threads", "2", "-y",
                 "-i", input_video,
                 "-filter_complex", 
-                f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[scaled];[scaled]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]",
+                # Chuỗi xử lý: Scale -> Hash Filter -> Split -> PingPong
+                f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,{hash_filters}[processed];[processed]split[main][rev];[rev]reverse[r];[main][r]concat=n=2:v=1:a=0[v]",
                 "-map", "[v]",
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
                 processed_bg
             ], check=True)
             bg_ready = True
-        except: pass
+        except Exception as e:
+            print(f"BG Process Fail: {e}")
 
-        # 3. GHÉP FINAL
-        print("-> Ghép Final: Loop Video khớp Audio...")
+        # GHÉP FINAL
         if bg_ready:
             subprocess.run([
                 "ffmpeg", "-threads", "2", "-y",
@@ -341,11 +323,10 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
                 output_file
             ], check=True)
         else:
-            raise Exception("Lỗi xử lý video nền (FFmpeg Fail)")
+             raise Exception("FFmpeg processing failed")
 
         background_tasks.add_task(cleanup_files, clean_list)
         return FileResponse(output_file, media_type='video/mp4', filename="list_short.mp4")
     except Exception as e:
         cleanup_files(clean_list)
-        # Ném lỗi 400 kèm nguyên nhân chi tiết
         raise HTTPException(status_code=400, detail=str(e))
