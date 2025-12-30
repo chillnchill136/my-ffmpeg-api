@@ -68,7 +68,7 @@ class ShortsRequest(BaseModel):
     audio_url: str
     header_text: str = "TOP LIST" 
     list_content: str = ""        
-    duration: int = 0 # Nếu = 0 thì tự động theo độ dài Audio
+    duration: int = 0 
 
 def cleanup_files(files):
     for f in files:
@@ -99,7 +99,7 @@ def get_video_dimensions(filepath):
         return 1080, 1920
 
 # ==========================================
-# 3. DRAWING LOGIC (Dynamic Resolution)
+# 3. DRAWING LOGIC (Watermark Added Here)
 # ==========================================
 def get_font_objects(size_header, size_body):
     try:
@@ -160,33 +160,36 @@ def create_list_overlay(header, content, output_img_path, target_w, target_h):
     img = Image.new('RGBA', (target_w, target_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
+    # Fonts
     FONT_SIZE_HEADER = int(target_w * 0.07)
     FONT_SIZE_BODY = int(target_w * 0.05)
-    
     font_header, font_body_bold, font_body_reg = get_font_objects(FONT_SIZE_HEADER, FONT_SIZE_BODY)
 
-    clean_header = header.replace("\\n", "\n").replace("\\N", "\n")
-    clean_content = content.replace("\\n", "\n").replace("\\N", "\n")
-
+    # Box Config
     box_width = int(target_w * 0.88)
     padding_x = int(target_w * 0.06)
     max_text_width = box_width - (padding_x * 2)
 
+    # Clean Text
+    clean_header = header.replace("\\n", "\n").replace("\\N", "\n")
+    clean_content = content.replace("\\n", "\n").replace("\\N", "\n")
+
+    # Measure Header
     import textwrap
     header_lines = []
     avg_char_width = FONT_SIZE_HEADER * 0.65
     chars_per_line = int(max_text_width / avg_char_width)
-    
     for line in clean_header.split('\n'):
         header_lines.extend(textwrap.wrap(line.strip().upper(), width=chars_per_line))
 
+    # Dimensions
     line_height_header = int(FONT_SIZE_HEADER * 1.3)
     line_height_body = int(FONT_SIZE_BODY * 1.5)
     spacing_header_body = int(target_h * 0.035) 
     padding_y = int(target_h * 0.04)
-    
     h_header = len(header_lines) * line_height_header
     
+    # Measure Body
     temp_y = 0
     body_items = clean_content.split('\n')
     dummy_draw = ImageDraw.Draw(Image.new('RGBA', (1, 1)))
@@ -194,18 +197,21 @@ def create_list_overlay(header, content, output_img_path, target_w, target_h):
         if not item.strip(): continue
         temp_y = draw_highlighted_line(dummy_draw, 0, temp_y, item, font_body_bold, font_body_reg, max_text_width, line_height_body)
         temp_y += int(target_h * 0.015) 
-    
     h_body = temp_y
+    
     box_height = padding_y + h_header + spacing_header_body + h_body + padding_y
     
+    # Box Position
     box_x = (target_w - box_width) // 2
     box_y = (target_h - box_height) // 2
     
+    # Draw Box
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], fill=(255, 255, 255, 245), outline=None)
     border_w = int(target_w * 0.006)
     if border_w < 2: border_w = 2
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], outline=(200, 200, 200, 150), width=border_w)
 
+    # Draw Header
     current_y = box_y + padding_y
     for line in header_lines:
         text_w = draw.textlength(line, font=font_header)
@@ -213,6 +219,7 @@ def create_list_overlay(header, content, output_img_path, target_w, target_h):
         draw.text((text_x, current_y), line, font=font_header, fill=(204, 0, 0, 255))
         current_y += line_height_header
 
+    # Draw Body
     current_y += spacing_header_body
     start_x = box_x + padding_x
     for item in body_items:
@@ -220,10 +227,30 @@ def create_list_overlay(header, content, output_img_path, target_w, target_h):
         current_y = draw_highlighted_line(draw, start_x, current_y, item, font_body_bold, font_body_reg, max_text_width, line_height_body)
         current_y += int(target_h * 0.015) 
 
+    # --- WATERMARK LOGIC (NEW) ---
+    try:
+        wm_text = "luangiai.vn"
+        # Size bé hơn body một chút (4% chiều rộng)
+        wm_size = int(target_w * 0.04) 
+        font_wm = ImageFont.truetype(FONT_BOLD_PATH, wm_size)
+        
+        # Đo chiều rộng chữ
+        wm_w = draw.textlength(wm_text, font=font_wm)
+        
+        # Căn giữa theo chiều ngang
+        wm_x = (target_w - wm_w) // 2
+        
+        # Căn dưới đáy, cách đáy 5% chiều cao
+        wm_y = target_h - int(target_h * 0.05) - wm_size
+        
+        # Màu xám nhạt (220, 220, 220), độ trong suốt Alpha = 80 (khoảng 30%)
+        draw.text((wm_x, wm_y), wm_text, font=font_wm, fill=(220, 220, 220, 80))
+    except: pass
+
     img.save(output_img_path)
 
 # ==========================================
-# 4. API 1: /merge (GIỮ NGUYÊN CHO BLOG)
+# 4. API 1: /merge (BLOG VIDEO)
 # ==========================================
 @app.post("/merge")
 def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
@@ -272,19 +299,13 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail=str(e))
 
 # ==========================================
-# 5. API 2: /shorts_list (NÂNG CẤP XỊN SÒ)
+# 5. API 2: /shorts_list (SHORTS VIDEO)
 # ==========================================
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
-    """
-    TÍNH NĂNG MỚI:
-    1. Tải Font Lora (Nếu có nixpacks.toml)
-    2. Dynamic Resolution (Khớp size video gốc)
-    3. PING-PONG + LOOP: Nối dài video nền khớp với Audio Voiceover
-    """
     req_id = str(uuid.uuid4())
     input_video = f"{req_id}_bg.mp4"
-    processed_bg = f"{req_id}_bg_processed.mp4" # Video nền đã PingPong và Resize
+    processed_bg = f"{req_id}_bg_processed.mp4" 
     input_audio = f"{req_id}_a.mp3"
     overlay_img = f"{req_id}_over.png"
     output_file = f"{req_id}_short.mp4"
@@ -294,20 +315,16 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
         vid_ok = download_file(request.video_url, input_video)
         aud_ok = download_file(request.audio_url, input_audio)
         
-        # 1. Xác định kích thước Video để làm Overlay
-        # Mặc định là HD nếu không tải được video
         target_w, target_h = 1080, 1920 
         if vid_ok:
             target_w, target_h = get_video_dimensions(input_video)
         
-        # 2. Tạo Overlay Text
+        # Tạo Overlay có Watermark
         create_list_overlay(request.header_text, request.list_content, overlay_img, target_w, target_h)
 
-        # 3. Xử lý Video Nền (Quan trọng: Ping-Pong + Resize cho khớp Overlay)
         bg_ready = False
         if vid_ok:
             try:
-                # Logic: Scale video về đúng kích thước đã đo (để Overlay khớp) + PingPong
                 subprocess.run([
                     "ffmpeg", "-threads", "2", "-y",
                     "-i", input_video,
@@ -318,27 +335,22 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
                     processed_bg
                 ], check=True)
                 bg_ready = True
-            except: 
-                print("⚠️ Lỗi PingPong/Resize nền -> Dùng nền đen")
+            except: pass
 
-        # 4. GHÉP FINAL (Loop theo Audio)
-        # Bây giờ dùng processed_bg (đã dài gấp đôi) và Loop tiếp cho khớp Audio
-        print("-> Ghép Final: Loop Video khớp Audio...")
         if bg_ready:
             subprocess.run([
                 "ffmpeg", "-threads", "4", "-y",
-                "-stream_loop", "-1",       # Loop vô hạn video nền
-                "-i", processed_bg,         # Input 0: Nền đã xử lý
-                "-i", input_audio,          # Input 1: Voiceover
-                "-i", overlay_img,          # Input 2: Text Overlay
+                "-stream_loop", "-1",       
+                "-i", processed_bg,         
+                "-i", input_audio,          
+                "-i", overlay_img,          
                 "-filter_complex", "[0:v][2:v]overlay=0:0[v]",
                 "-map", "[v]", "-map", "1:a",
                 "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
-                "-shortest",                # Cắt khi hết Audio Voiceover
+                "-shortest",                
                 output_file
             ], check=True)
         else:
-            # Fallback nền đen tĩnh (vẫn có tiếng)
             subprocess.run([
                 "ffmpeg", "-loop", "1", "-y",
                 "-i", overlay_img,
