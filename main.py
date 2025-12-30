@@ -5,7 +5,7 @@ import shutil
 import requests
 import gc
 import json
-import random  # <--- Thêm thư viện random
+import random
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -116,99 +116,132 @@ def get_font_objects(size_header, size_body):
 def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max_width, line_height):
     COLOR_HIGHLIGHT = (204, 0, 0, 255) 
     COLOR_NORMAL = (0, 0, 0, 255)      
+    
     if ":" in text:
         parts = text.split(":", 1)
         part_bold = parts[0] + ":"
         part_reg = parts[1]
     else:
-        part_bold = "", part_reg = text
+        # --- ĐÃ SỬA LỖI CÚ PHÁP TẠI ĐÂY ---
+        part_bold = ""
+        part_reg = text
+        
     current_x = x_start
     current_y = y_start
+    
     if part_bold:
         words = part_bold.split()
         for i, word in enumerate(words):
             suffix = " " if i < len(words) else "" 
             word_w = draw.textlength(word + suffix, font=font_bold)
             if current_x + word_w > x_start + max_width:
-                current_x = x_start; current_y += line_height
+                current_x = x_start
+                current_y += line_height
             draw.text((current_x, current_y), word, font=font_bold, fill=COLOR_HIGHLIGHT)
             current_x += word_w
+
     if part_reg:
         words = part_reg.split()
         if part_bold and current_x > x_start:
-             space_w = draw.textlength(" ", font=font_reg); current_x += space_w
+             space_w = draw.textlength(" ", font=font_reg)
+             current_x += space_w
         for i, word in enumerate(words):
             word_w = draw.textlength(word, font=font_reg)
             space_w = draw.textlength(" ", font=font_reg)
             if current_x + word_w > x_start + max_width:
-                current_x = x_start; current_y += line_height
-            draw.text((current_x, current_y), word, font=font_reg, fill=COLOR_NORMAL)
-            current_x += word_w; 
+                current_x = x_start
+                current_y += line_height
+                draw.text((current_x, current_y), word, font=font_reg, fill=COLOR_NORMAL)
+                current_x += word_w
+            else:
+                draw.text((current_x, current_y), word, font=font_reg, fill=COLOR_NORMAL)
+                current_x += word_w
             if i < len(words) - 1: current_x += space_w
+            
     return current_y + line_height
 
 def create_list_overlay(header, content, output_img_path):
     target_w, target_h = 1080, 1920
     img = Image.new('RGBA', (target_w, target_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    FONT_SIZE_HEADER = int(target_w * 0.07); FONT_SIZE_BODY = int(target_w * 0.05)
+    
+    FONT_SIZE_HEADER = int(target_w * 0.07)
+    FONT_SIZE_BODY = int(target_w * 0.05)
     font_header, font_body_bold, font_body_reg = get_font_objects(FONT_SIZE_HEADER, FONT_SIZE_BODY)
-    box_width = int(target_w * 0.88); padding_x = int(target_w * 0.06); max_text_width = box_width - (padding_x * 2)
+    
+    box_width = int(target_w * 0.88)
+    padding_x = int(target_w * 0.06)
+    max_text_width = box_width - (padding_x * 2)
+    
     clean_header = header.replace("\\n", "\n").replace("\\N", "\n")
     clean_content = content.replace("\\n", "\n").replace("\\N", "\n")
+    
     import textwrap
     header_lines = []
     chars_per_line = int(max_text_width / (FONT_SIZE_HEADER * 0.65))
-    for line in clean_header.split('\n'): header_lines.extend(textwrap.wrap(line.strip().upper(), width=chars_per_line))
-    line_height_header = int(FONT_SIZE_HEADER * 1.3); line_height_body = int(FONT_SIZE_BODY * 1.5)
-    spacing_header_body = int(target_h * 0.035); padding_y = int(target_h * 0.04)
+    for line in clean_header.split('\n'): 
+        header_lines.extend(textwrap.wrap(line.strip().upper(), width=chars_per_line))
+    
+    line_height_header = int(FONT_SIZE_HEADER * 1.3)
+    line_height_body = int(FONT_SIZE_BODY * 1.5)
+    spacing_header_body = int(target_h * 0.035)
+    padding_y = int(target_h * 0.04)
+    
     h_header = len(header_lines) * line_height_header
-    temp_y = 0; body_items = clean_content.split('\n'); dummy_draw = ImageDraw.Draw(Image.new('RGBA', (1, 1)))
+    
+    temp_y = 0
+    body_items = clean_content.split('\n')
+    dummy_draw = ImageDraw.Draw(Image.new('RGBA', (1, 1)))
     for item in body_items:
         if not item.strip(): continue
         temp_y = draw_highlighted_line(dummy_draw, 0, temp_y, item, font_body_bold, font_body_reg, max_text_width, line_height_body)
         temp_y += int(target_h * 0.015) 
+    
     h_body = temp_y
+    
     box_height = padding_y + h_header + spacing_header_body + h_body + padding_y
-    box_x = (target_w - box_width) // 2; box_y = (target_h - box_height) // 2
+    box_x = (target_w - box_width) // 2
+    box_y = (target_h - box_height) // 2
+    
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], fill=(255, 255, 255, 245), outline=None)
-    border_w = int(target_w * 0.006); 
+    border_w = int(target_w * 0.006)
     if border_w < 2: border_w = 2
     draw.rectangle([(box_x, box_y), (box_x + box_width, box_y + box_height)], outline=(200, 200, 200, 150), width=border_w)
+    
     current_y = box_y + padding_y
     for line in header_lines:
-        text_w = draw.textlength(line, font=font_header); text_x = box_x + (box_width - text_w) // 2 
-        draw.text((text_x, current_y), line, font=font_header, fill=(204, 0, 0, 255)); current_y += line_height_header
-    current_y += spacing_header_body; start_x = box_x + padding_x
+        text_w = draw.textlength(line, font=font_header)
+        text_x = box_x + (box_width - text_w) // 2 
+        draw.text((text_x, current_y), line, font=font_header, fill=(204, 0, 0, 255))
+        current_y += line_height_header
+    
+    current_y += spacing_header_body
+    start_x = box_x + padding_x
     for item in body_items:
         if not item.strip(): continue
         current_y = draw_highlighted_line(draw, start_x, current_y, item, font_body_bold, font_body_reg, max_text_width, line_height_body)
         current_y += int(target_h * 0.015) 
+        
     try:
-        wm_text = "luangiai.vn"; wm_size = int(target_w * 0.04) 
+        wm_text = "luangiai.vn"
+        wm_size = int(target_w * 0.04) 
         font_wm = ImageFont.truetype(FONT_BOLD_PATH, wm_size)
-        wm_w = draw.textlength(wm_text, font=font_wm); wm_x = (target_w - wm_w) // 2
+        wm_w = draw.textlength(wm_text, font=font_wm)
+        wm_x = (target_w - wm_w) // 2
         wm_y = target_h - int(target_h * 0.05) - wm_size
         draw.text((wm_x, wm_y), wm_text, font=font_wm, fill=(220, 220, 220, 80))
     except: pass
+    
     img.save(output_img_path)
 
 def get_random_hash_filter():
     """Tạo chuỗi filter ngẫu nhiên để thay đổi Hash Video"""
     filters = []
-    
-    # 1. Random Mirror (Lật gương - Tỷ lệ 50%)
     if random.choice([True, False]):
-        filters.append("hflip") # Lật ngang
+        filters.append("hflip")
     
-    # 2. Subtle Noise (Nhiễu hạt cực nhẹ - Luôn có)
-    # c0s=2: noise strength 2% (rất nhỏ)
-    # allf=t: temporal noise (nhiễu động) -> Pixel thay đổi liên tục
     filters.append("noise=c0s=2:allf=t")
     
-    # 3. Micro Color Eq (Chỉnh màu vi mô - Luôn có)
-    # brightness thay đổi từ -0.02 đến +0.02
-    # saturation thay đổi từ 0.95 đến 1.05
     bri = random.uniform(-0.02, 0.02)
     sat = random.uniform(0.95, 1.05)
     filters.append(f"eq=brightness={bri:.3f}:saturation={sat:.3f}")
@@ -234,7 +267,6 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
         final_input_video = input_video
         if request.ping_pong:
             try:
-                # Thêm Hash Filter vào trước khi split
                 hash_filters = get_random_hash_filter()
                 print(f"Applying Hash Filters: {hash_filters}")
                 
@@ -291,7 +323,7 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
         # XỬ LÝ NỀN: Resize 1080p + HASH KILLER + PingPong
         bg_ready = False
         try:
-            hash_filters = get_random_hash_filter() # Sinh filter ngẫu nhiên
+            hash_filters = get_random_hash_filter()
             print(f"Applying Hash Filters: {hash_filters}")
 
             subprocess.run([
@@ -308,7 +340,6 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
         except Exception as e:
             print(f"BG Process Fail: {e}")
 
-        # GHÉP FINAL
         if bg_ready:
             subprocess.run([
                 "ffmpeg", "-threads", "2", "-y",
