@@ -19,7 +19,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 app = FastAPI()
 
 # ==========================================
-# 1. CẤU HÌNH FONT & HỆ THỐNG
+# 1. CẤU HÌNH FONT & HỆ THỐNG (GIỮ NGUYÊN)
 # ==========================================
 FONT_DIR = "/app/fonts"
 if not os.path.exists(FONT_DIR): os.makedirs(FONT_DIR, exist_ok=True)
@@ -53,7 +53,7 @@ async def startup_check():
     download_font_force()
 
 # ==========================================
-# 2. MODELS & HELPERS
+# 2. MODELS & HELPERS (CÓ BỔ SUNG MODEL MỚI)
 # ==========================================
 class MergeRequest(BaseModel):
     video_url: str = ""
@@ -69,6 +69,17 @@ class ShortsRequest(BaseModel):
     header_text: str = "TOP LIST" 
     list_content: str = ""        
     duration: int = 0 
+
+# --- 👇 PHẦN MỚI THÊM VÀO (KHÔNG ẢNH HƯỞNG CŨ) 👇 ---
+class SceneItem(BaseModel):
+    scene_id: int
+    video_url: str
+    audio_url: str
+
+class SmartMergeRequest(BaseModel):
+    scenes: list[SceneItem]
+    final_filename: str = "smart_merge_output.mp4"
+# ---------------------------------------------------
 
 def cleanup_files(files):
     for f in files:
@@ -102,7 +113,7 @@ def download_file(url, filename):
         return False
 
 # ==========================================
-# 3. DRAWING LOGIC & HASH KILLER
+# 3. DRAWING LOGIC & HASH KILLER (GIỮ NGUYÊN)
 # ==========================================
 def get_font_objects(size_header, size_body):
     try:
@@ -115,14 +126,13 @@ def get_font_objects(size_header, size_body):
 
 def draw_highlighted_line(draw, x_start, y_start, text, font_bold, font_reg, max_width, line_height):
     COLOR_HIGHLIGHT = (204, 0, 0, 255) 
-    COLOR_NORMAL = (0, 0, 0, 255)      
+    COLOR_NORMAL = (0, 0, 0, 255)       
     
     if ":" in text:
         parts = text.split(":", 1)
         part_bold = parts[0] + ":"
         part_reg = parts[1]
     else:
-        # --- ĐÃ SỬA LỖI CÚ PHÁP TẠI ĐÂY ---
         part_bold = ""
         part_reg = text
         
@@ -249,7 +259,7 @@ def get_random_hash_filter():
     return ",".join(filters)
 
 # ==========================================
-# 4. API 1: /merge (BLOG VIDEO)
+# 4. API 1: /merge (GIỮ NGUYÊN)
 # ==========================================
 @app.post("/merge")
 def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
@@ -302,7 +312,7 @@ def merge_video_audio(request: MergeRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail=str(e))
 
 # ==========================================
-# 5. API 2: /shorts_list (SAFE MODE + HASH KILLER)
+# 5. API 2: /shorts_list (GIỮ NGUYÊN)
 # ==========================================
 @app.post("/shorts_list")
 def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks):
@@ -360,4 +370,106 @@ def create_shorts_list(request: ShortsRequest, background_tasks: BackgroundTasks
         return FileResponse(output_file, media_type='video/mp4', filename="list_short.mp4")
     except Exception as e:
         cleanup_files(clean_list)
+        raise HTTPException(status_code=400, detail=str(e))
+
+# ==========================================
+# 6. API 3: /smart_merge (PHẦN MỚI CHO 10 SCENES)
+# ==========================================
+@app.post("/smart_merge")
+def smart_merge_endpoint(request: SmartMergeRequest, background_tasks: BackgroundTasks):
+    req_id = str(uuid.uuid4())
+    output_file = f"{req_id}_smart_final.mp4"
+    
+    # Danh sách file cần dọn dẹp sau khi xong
+    clean_list = [output_file]
+    
+    try:
+        inputs = []
+        filter_complex = ""
+        concat_v = ""
+        concat_a = ""
+        
+        # Tạo thư mục tạm riêng cho request này để tránh trùng file
+        temp_dir = f"temp_{req_id}"
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+        
+        # Hàm con lấy duration để cắt scene
+        def get_duration(file_path):
+            cmd = [
+                'ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
+                '-of', 'default=noprint_wrappers=1:nokey=1', file_path
+            ]
+            try:
+                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                return float(result.stdout.strip())
+            except: return 5.0 # Fallback
+            
+        scene_files = [] # Lưu path để xóa sau
+
+        for i, scene in enumerate(request.scenes):
+            # 1. Tải file về
+            v_path = os.path.join(temp_dir, f"v_{i}.mp4")
+            a_path = os.path.join(temp_dir, f"a_{i}.mp3")
+            
+            # Download Video & Audio
+            if not download_file(scene.video_url, v_path): raise Exception(f"DL Fail Video {i}")
+            if not download_file(scene.audio_url, a_path): raise Exception(f"DL Fail Audio {i}")
+                
+            scene_files.extend([v_path, a_path])
+
+            # 2. Lấy duration audio để cắt video theo
+            duration = get_duration(a_path)
+            print(f"🎬 Scene {i+1}: Duration {duration}s")
+            
+            # 3. Xây dựng input cho FFmpeg
+            # Input index: Video là i*2, Audio là i*2+1
+            inputs.extend(['-i', v_path, '-i', a_path])
+            
+            v_idx = i * 2
+            a_idx = i * 2 + 1
+            
+            # 4. Filter xử lý: Scale 9:16 -> Crop -> Trim theo Audio -> Reset PTS
+            filter_complex += (
+                f"[{v_idx}:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+                f"crop=1080:1920,setsar=1,fps=30,trim=duration={duration},"
+                f"setpts=PTS-STARTPTS[v{i}];"
+            )
+            
+            # Audio: Giữ nguyên
+            filter_complex += f"[{a_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[a{i}];"
+            
+            concat_v += f"[v{i}]"
+            concat_a += f"[a{i}]"
+
+        # 5. Filter Nối (Concat) tất cả các scene
+        filter_complex += f"{concat_v}{concat_a}concat=n={len(request.scenes)}:v=1:a=1[outv][outa]"
+        
+        # 6. Chạy lệnh FFmpeg
+        cmd = ['ffmpeg', '-threads', '4', '-y'] + inputs + [
+            '-filter_complex', filter_complex,
+            '-map', '[outv]', '-map', '[outa]',
+            '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-b:a', '192k',
+            output_file
+        ]
+        
+        print("🚀 Running Smart Merge FFmpeg...")
+        subprocess.run(cmd, check=True)
+        
+        # Hàm dọn dẹp thư mục tạm
+        def cleanup_wrapper():
+            cleanup_files(clean_list)
+            try: shutil.rmtree(temp_dir) 
+            except: pass
+
+        background_tasks.add_task(cleanup_wrapper)
+        
+        return FileResponse(output_file, media_type='video/mp4', filename=request.final_filename)
+
+    except Exception as e:
+        try: shutil.rmtree(f"temp_{req_id}")
+        except: pass
+        cleanup_files(clean_list)
+        print(f"❌ Smart Merge Error: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
